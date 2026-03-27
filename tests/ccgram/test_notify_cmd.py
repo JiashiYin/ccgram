@@ -171,7 +171,9 @@ class TestNotifyLaunch:
         assert kwargs["work_dir"] == str(tmp_path)
         assert kwargs["launch_command"] == "/usr/bin/codex"
         assert kwargs["agent_args"] == "--model gpt-5"
-        session_manager.set_window_provider.assert_called_once_with("@12", "codex")
+        session_manager.set_window_provider.assert_called_once_with(
+            "@12", "codex", cwd=str(tmp_path)
+        )
         session_manager.set_notification_mode.assert_called_once_with("@12", "notify")
         stamp_pane_title.assert_awaited_once_with("@12", "codex")
         select_window.assert_called_once_with("@12")

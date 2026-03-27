@@ -1,4 +1,4 @@
-"""CLI helpers for ccgram notify setup and launches."""
+"""CLI commands for Codex-first notify-shell setup."""
 
 from __future__ import annotations
 
@@ -6,178 +6,187 @@ import asyncio
 import os
 import shlex
 import subprocess
-from types import SimpleNamespace
 from pathlib import Path
 
 import click
 
 from .notify_shell import (
-    DEFAULT_NOTIFY_MODE,
-    SUPPORTED_SHELLS,
-    detect_shell_name,
-    disable_notify_integration,
+    disable_notify_shell,
     get_notify_status,
-    install_notify_integration,
-    uninstall_notify_integration,
+    install_notify_shell,
+    uninstall_notify_shell,
 )
 from .providers import resolve_launch_command
 from .utils import tmux_session_name
 
-tmux_manager = SimpleNamespace(create_window=None, stamp_pane_title=None)
-session_manager = SimpleNamespace(set_window_provider=None, set_notification_mode=None)
+_NOTIFY_MODES = ("notify", "interactive")
+_SHELLS = ("bash", "zsh", "fish")
 
 
-def _ensure_tmux_manager():
-    global tmux_manager
-    if not hasattr(tmux_manager, "create_window"):
-        from .tmux_manager import tmux_manager as live_tmux_manager
+class _LazyTmuxManagerProxy:
+    """Delay importing tmux_manager until a launch path actually needs it."""
 
-        tmux_manager = live_tmux_manager
-    return tmux_manager
+    def __getattr__(self, name: str) -> object:
+        from .tmux_manager import tmux_manager as real_tmux_manager
+
+        return getattr(real_tmux_manager, name)
 
 
-def _ensure_session_manager():
-    global session_manager
-    if not hasattr(session_manager, "set_notification_mode"):
-        from .session import session_manager as live_session_manager
+class _LazySessionManagerProxy:
+    """Delay importing session_manager until a launch path actually needs it."""
 
-        session_manager = live_session_manager
-    return session_manager
+    def __getattr__(self, name: str) -> object:
+        from .session import session_manager as real_session_manager
+
+        return getattr(real_session_manager, name)
+
+
+tmux_manager = _LazyTmuxManagerProxy()
+session_manager = _LazySessionManagerProxy()
+
+
+def _print_notify_status(provider: str) -> None:
+    status = get_notify_status(provider)
+    print(f"Provider: {provider}")
+    print(f"Status: {'enabled' if status.enabled else 'disabled' if status.installed else 'not installed'}")
+    if status.installed:
+        print(f"Shell: {status.shell}")
+        print(f"Mode: {status.mode}")
+        print(f"RC file: {status.rc_path}")
+        print(f"Snippet: {status.snippet_path}")
+        print(f"Direct launcher: {status.direct_launcher_path}")
 
 
 def _select_and_attach_window(window_id: str) -> None:
     session_name = tmux_session_name()
-    target = f"{session_name}:{window_id}"
-    subprocess.run(["tmux", "select-window", "-t", target], check=False)
+    subprocess.run(
+        ["tmux", "select-window", "-t", f"{session_name}:{window_id}"],
+        check=True,
+        timeout=5,
+        capture_output=True,
+        text=True,
+    )
     if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "switch-client", "-t", session_name], check=False)
-    else:
-        subprocess.run(["tmux", "attach-session", "-t", session_name], check=False)
+        subprocess.run(
+            ["tmux", "switch-client", "-t", session_name],
+            check=True,
+            timeout=5,
+            capture_output=True,
+            text=True,
+        )
+        return
+    subprocess.run(
+        ["tmux", "attach-session", "-t", session_name],
+        check=True,
+        timeout=5,
+        capture_output=True,
+        text=True,
+    )
 
 
-async def _launch_window(
+async def _launch_session(
     *,
     provider: str,
     cwd: str,
     mode: str,
-    agent_args: tuple[str, ...],
     attach: bool,
-) -> tuple[bool, str, str, str]:
-    tmux = _ensure_tmux_manager()
-    sm = _ensure_session_manager()
+    agent_args: str,
+) -> tuple[str, str]:
     launch_command = resolve_launch_command(provider)
-    joined_args = shlex.join(agent_args)
-    success, message, window_name, window_id = await tmux.create_window(
+    success, message, _window_name, window_id = await tmux_manager.create_window(
         work_dir=cwd,
         launch_command=launch_command,
-        agent_args=joined_args,
+        agent_args=agent_args,
     )
-    if not success:
-        return success, message, window_name, window_id
-    sm.set_window_provider(window_id, provider)
-    sm.set_notification_mode(window_id, mode)
-    await tmux.stamp_pane_title(window_id, provider)
+    if not success or not window_id:
+        raise click.ClickException(message or f"Failed to launch {provider}")
+
+    session_manager.set_window_provider(window_id, provider, cwd=cwd)
+    session_manager.set_notification_mode(window_id, mode)
+    await tmux_manager.stamp_pane_title(window_id, provider)
+
     if attach:
         _select_and_attach_window(window_id)
-    return success, message, window_name, window_id
-
-
-def notify_install_main(provider: str, shell: str | None, mode: str) -> dict:
-    return install_notify_integration(
-        provider,
-        shell=detect_shell_name(shell),
-        mode=mode,
-    )
-
-
-def notify_status_main(provider: str) -> dict:
-    return get_notify_status(provider)
-
-
-def notify_disable_main(provider: str) -> dict:
-    return disable_notify_integration(provider)
-
-
-def notify_uninstall_main(provider: str) -> dict:
-    return uninstall_notify_integration(provider)
+    return window_id, message
 
 
 @click.group("notify")
 def notify_group() -> None:
-    """Codex-first notify setup and shell integration commands."""
+    """Codex-first setup and shell integration commands."""
 
 
 @notify_group.command("install")
 @click.option("--provider", default="codex", show_default=True)
-@click.option("--shell", type=click.Choice(SUPPORTED_SHELLS), default=None)
-@click.option(
-    "--mode",
-    type=click.Choice(["notify", "interactive"]),
-    default=DEFAULT_NOTIFY_MODE,
-    show_default=True,
-)
-def notify_install_cmd(provider: str, shell: str | None, mode: str) -> None:
-    status = notify_install_main(provider, shell, mode)
-    click.echo(f"Installed notify shell integration for {provider}")
-    click.echo(f"Shell: {status['shell']}")
-    click.echo(f"Mode: {status['mode']}")
-    click.echo(f"RC file: {status['rc_path']}")
+@click.option("--shell", "shell_name", type=click.Choice(_SHELLS), default=None)
+def notify_install_cmd(provider: str, shell_name: str | None) -> None:
+    """Install shell integration so plain provider launches default to notify."""
+    status = install_notify_shell(provider=provider, shell=shell_name)
+    print(
+        f"Installed notify shell integration for {provider} ({status.shell}). "
+        f"New shells will route `{provider}` through ccgram notify."
+    )
+    _print_notify_status(provider)
 
 
 @notify_group.command("status")
 @click.option("--provider", default="codex", show_default=True)
 def notify_status_cmd(provider: str) -> None:
-    status = notify_status_main(provider)
-    click.echo(f"Provider: {provider}")
-    click.echo(f"Status: {'enabled' if status['enabled'] else 'disabled'}")
-    click.echo(f"Shell: {status['shell']}")
-    click.echo(f"Mode: {status['mode']}")
-    click.echo(f"RC file: {status['rc_path']}")
+    """Show notify-shell status."""
+    _print_notify_status(provider)
 
 
 @notify_group.command("disable")
 @click.option("--provider", default="codex", show_default=True)
 def notify_disable_cmd(provider: str) -> None:
-    status = notify_disable_main(provider)
-    click.echo(f"Disabled notify shell integration for {provider}")
-    click.echo(f"Status: {'enabled' if status['enabled'] else 'disabled'}")
+    """Disable shell interception without removing installed artifacts."""
+    disable_notify_shell(provider)
+    print(f"Disabled notify shell integration for {provider}.")
+    _print_notify_status(provider)
 
 
 @notify_group.command("uninstall")
 @click.option("--provider", default="codex", show_default=True)
 def notify_uninstall_cmd(provider: str) -> None:
-    notify_uninstall_main(provider)
-    click.echo(f"Uninstalled notify shell integration for {provider}")
+    """Remove notify shell integration and direct-launch override."""
+    uninstall_notify_shell(provider)
+    print(f"Uninstalled notify shell integration for {provider}.")
+    _print_notify_status(provider)
 
 
-@notify_group.command("launch")
+@notify_group.command(
+    "launch",
+    context_settings={"ignore_unknown_options": True},
+)
 @click.option("--provider", default="codex", show_default=True)
-@click.option("--cwd", type=click.Path(path_type=Path), default=Path.cwd())
 @click.option(
     "--mode",
-    type=click.Choice(["notify", "interactive"]),
-    default=DEFAULT_NOTIFY_MODE,
+    type=click.Choice(_NOTIFY_MODES),
+    default="notify",
     show_default=True,
+)
+@click.option(
+    "--cwd",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path.cwd,
+    show_default="current directory",
 )
 @click.option("--attach/--no-attach", default=False, show_default=True)
 @click.argument("agent_args", nargs=-1, type=click.UNPROCESSED)
 def notify_launch_cmd(
     provider: str,
-    cwd: Path,
     mode: str,
+    cwd: Path,
     attach: bool,
     agent_args: tuple[str, ...],
 ) -> None:
-    success, message, window_name, window_id = asyncio.run(
-        _launch_window(
+    """Launch a provider session inside the monitored tmux workflow."""
+    window_id, message = asyncio.run(
+        _launch_session(
             provider=provider,
-            cwd=str(cwd),
+            cwd=str(cwd.resolve()),
             mode=mode,
-            agent_args=agent_args,
             attach=attach,
+            agent_args=shlex.join(list(agent_args)),
         )
     )
-    if not success:
-        raise click.ClickException(message)
-    click.echo(message)
-    click.echo(f"Window: {window_name} ({window_id})")
+    print(f"{message} [{window_id}]")

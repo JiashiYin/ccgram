@@ -68,17 +68,17 @@ def _check_provider_command(provider_name: str) -> tuple[str, str]:
 def _check_notify_shell(provider_name: str) -> tuple[str, str]:
     """Check notify shell integration status for a provider."""
     status = get_notify_status(provider_name)
-    if not status["configured"]:
-        return _WARN, f"notify shell not configured for {provider_name}"
-    if not status["snippet_exists"]:
+    if not status.installed:
+        return _PASS, f"notify shell not installed for {provider_name}"
+    if not status.snippet_exists:
         return _FAIL, f"notify shell snippet missing for {provider_name}"
-    if not status["direct_launcher_exists"]:
+    if not status.direct_launcher_exists:
         return _FAIL, f"notify direct launcher missing for {provider_name}"
-    if not status["env_matches_direct_launcher"]:
-        return _FAIL, f"notify env override mismatch for {provider_name}"
-    if status["enabled"] and not status["rc_hook_present"]:
-        return _FAIL, f"notify shell hook missing from {status['rc_path']}"
-    state = "enabled" if status["enabled"] else "disabled"
+    if status.env_value != status.direct_launcher_path:
+        return _FAIL, f"{status.env_key} does not point to notify direct launcher"
+    if status.enabled and not status.rc_hook_present:
+        return _FAIL, f"notify shell hook missing from {status.rc_path}"
+    state = "enabled" if status.enabled else "disabled"
     return _PASS, f"notify shell {state} for {provider_name}"
 
 

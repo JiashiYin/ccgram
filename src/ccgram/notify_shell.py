@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import contextlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -220,7 +221,7 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
     if shell == "fish":
         return (
             f"function {provider}\n"
-            f"    command ccgram notify launch --provider {provider} --attach --cwd \"$PWD\" -- $argv\n"
+            f"    command ccgram notify launch --provider {provider} --attach -- $argv\n"
             "end\n\n"
             f"function {provider}-direct\n"
             f"    command {quoted_direct} $argv\n"
@@ -228,7 +229,7 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
         )
     return (
         f"{provider}() {{\n"
-        f"  command ccgram notify launch --provider {provider} --attach --cwd \"$PWD\" -- \"$@\"\n"
+        f"  command ccgram notify launch --provider {provider} --attach -- \"$@\"\n"
         "}\n\n"
         f"alias {provider}-direct={quoted_direct}\n"
     )
@@ -329,10 +330,8 @@ def uninstall_notify_shell(provider: str = "codex") -> NotifyStatus:
         if key == "rc_path":
             _remove_rc_block(path)
             continue
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     _remove_env_value(_dotenv_path(), _env_key(provider))
     providers.pop(provider, None)
