@@ -161,23 +161,30 @@ The repo also ships plugin-style metadata in:
    - **Topics**: Enabled (Bot Settings > Groups & Channels > Edit Topics > Enable)
 3. Add the bot to a Telegram group with Topics enabled.
 4. **Promote the bot to Administrator** and ensure it has the **Create Topics** permission (required for the bot to automatically sync and manage session topics).
-5. Create `~/.ccgram/.env`:
-
-```ini
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-ALLOWED_USERS=your_telegram_user_id
-CCGRAM_GROUP_ID=your_telegram_group_id
-```
-
-> Get your user ID from [@userinfobot](https://t.me/userinfobot) on Telegram.
-> Get the group ID by adding -100 in front of the **Peer ID** found in the Group Info (or use [@RawDataBot](https://t.me/RawDataBot)).
-
-6. Install notify shell integration for normal Codex launches:
+5. Run the guided notify installer for normal Codex launches:
 
 ```bash
 ccgram notify install --provider codex --shell bash
 ccgram notify status
 ccgram doctor
+```
+
+`ccgram notify install` now prompts for any missing Telegram setup, writes `~/.ccgram/.env` for you, and then installs the shell integration. It asks for:
+
+- bot token from [@BotFather](https://t.me/BotFather)
+- allowed Telegram user IDs (get yours from [@userinfobot](https://t.me/userinfobot))
+- optional Telegram group ID (for single-group restriction; use [@RawDataBot](https://t.me/RawDataBot) if you want to set it)
+
+For automation or CI, you can still pass these explicitly:
+
+```bash
+ccgram notify install \
+  --provider codex \
+  --shell bash \
+  --non-interactive \
+  --bot-token "$TELEGRAM_BOT_TOKEN" \
+  --allowed-users "123456789" \
+  --group-id "-1001234567890"
 ```
 
 After this one-time step, typing plain `codex` routes into the monitored tmux workflow and defaults to `notify`.

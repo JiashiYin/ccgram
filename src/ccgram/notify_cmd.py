@@ -1,4 +1,4 @@
-"""CLI commands for Codex-first notify-shell setup."""
+"""CLI commands for Codex-first notify setup and guided onboarding."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from .notify_onboarding import persist_telegram_setup, resolve_telegram_setup
 from .notify_shell import (
     disable_notify_shell,
     get_notify_status,
@@ -108,15 +109,46 @@ async def _launch_session(
 
 @click.group("notify")
 def notify_group() -> None:
-    """Codex-first setup and shell integration commands."""
+    """Codex-first setup, onboarding, and shell integration commands."""
 
 
 @notify_group.command("install")
 @click.option("--provider", default="codex", show_default=True)
 @click.option("--shell", "shell_name", type=click.Choice(_SHELLS), default=None)
-def notify_install_cmd(provider: str, shell_name: str | None) -> None:
-    """Install shell integration so plain provider launches default to notify."""
+@click.option("--bot-token", default=None, help="Telegram bot token.")
+@click.option(
+    "--allowed-users",
+    default=None,
+    help="Comma-separated Telegram user IDs allowed to control the bot.",
+)
+@click.option(
+    "--group-id",
+    default=None,
+    help="Optional Telegram group ID to restrict the bot to one group.",
+)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    help="Fail instead of prompting for missing Telegram configuration.",
+)
+def notify_install_cmd(
+    provider: str,
+    shell_name: str | None,
+    bot_token: str | None,
+    allowed_users: str | None,
+    group_id: str | None,
+    non_interactive: bool,
+) -> None:
+    """Configure Telegram + shell integration so plain launches default to notify."""
+    setup = resolve_telegram_setup(
+        bot_token=bot_token,
+        allowed_users=allowed_users,
+        group_id=group_id,
+        non_interactive=non_interactive,
+    )
+    dotenv_path = persist_telegram_setup(setup)
     status = install_notify_shell(provider=provider, shell=shell_name)
+    print(f"Stored Telegram config in {dotenv_path}.")
     print(
         f"Installed notify shell integration for {provider} ({status.shell}). "
         f"New shells will route `{provider}` through ccgram notify."

@@ -22,13 +22,121 @@ def _direct_launcher_path(config_dir: Path, provider: str) -> Path:
     return config_dir / "bin" / f"{provider}-direct"
 
 
+def _seed_telegram_env(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:test-token")
+    monkeypatch.setenv("ALLOWED_USERS", "12345")
+
+
+def _clear_telegram_env(monkeypatch) -> None:
+    for key in ("TELEGRAM_BOT_TOKEN", "ALLOWED_USERS", "CCGRAM_GROUP_ID"):
+        monkeypatch.delenv(key, raising=False)
+
+
 class TestNotifyInstall:
+    def test_install_prompts_for_missing_telegram_config_and_persists_it(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _clear_telegram_env(monkeypatch)
+
+        result = runner.invoke(
+            cli,
+            ["notify", "install", "--provider", "codex", "--shell", "bash"],
+            input="123456:bot-token\n12345\n-100999\n",
+        )
+
+        assert result.exit_code == 0
+        dotenv = (tmp_path / ".env").read_text()
+        assert "TELEGRAM_BOT_TOKEN=123456:bot-token" in dotenv
+        assert "ALLOWED_USERS=12345" in dotenv
+        assert "CCGRAM_GROUP_ID=-100999" in dotenv
+
+    def test_install_allows_optional_group_id_to_be_skipped(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _clear_telegram_env(monkeypatch)
+
+        result = runner.invoke(
+            cli,
+            ["notify", "install", "--provider", "codex", "--shell", "bash"],
+            input="123456:bot-token\n12345\n\n",
+        )
+
+        assert result.exit_code == 0
+        dotenv = (tmp_path / ".env").read_text()
+        assert "TELEGRAM_BOT_TOKEN=123456:bot-token" in dotenv
+        assert "ALLOWED_USERS=12345" in dotenv
+        assert "CCGRAM_GROUP_ID=" not in dotenv
+
+    def test_install_non_interactive_fails_when_telegram_config_missing(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _clear_telegram_env(monkeypatch)
+
+        result = runner.invoke(
+            cli,
+            [
+                "notify",
+                "install",
+                "--provider",
+                "codex",
+                "--shell",
+                "bash",
+                "--non-interactive",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "TELEGRAM_BOT_TOKEN" in result.output
+
+    def test_install_accepts_explicit_telegram_flags_non_interactively(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _clear_telegram_env(monkeypatch)
+
+        result = runner.invoke(
+            cli,
+            [
+                "notify",
+                "install",
+                "--provider",
+                "codex",
+                "--shell",
+                "bash",
+                "--non-interactive",
+                "--bot-token",
+                "123456:bot-token",
+                "--allowed-users",
+                "12345,67890",
+                "--group-id",
+                "-100999",
+            ],
+        )
+
+        assert result.exit_code == 0
+        dotenv = (tmp_path / ".env").read_text()
+        assert "TELEGRAM_BOT_TOKEN=123456:bot-token" in dotenv
+        assert "ALLOWED_USERS=12345,67890" in dotenv
+        assert "CCGRAM_GROUP_ID=-100999" in dotenv
+
     def test_install_writes_shell_snippet_and_state(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         result = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
@@ -64,6 +172,7 @@ class TestNotifyInstall:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         install = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
@@ -88,6 +197,7 @@ class TestNotifyInstall:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         install = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
@@ -109,6 +219,7 @@ class TestNotifyInstall:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         install = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
@@ -129,6 +240,7 @@ class TestNotifyInstall:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         first = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
@@ -151,6 +263,7 @@ class TestNotifyInstall:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         first = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
@@ -172,6 +285,7 @@ class TestNotifyInstall:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
 
         install = runner.invoke(
             cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
