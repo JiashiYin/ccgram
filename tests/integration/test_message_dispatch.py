@@ -170,7 +170,14 @@ async def test_unknown_command_forwarded(app) -> None:
         ),
         patch("ccgram.bot.session_manager.get_display_name", return_value="test-win"),
         patch("ccgram.bot.safe_reply", new_callable=AsyncMock),
-        patch.object(Chat, "send_action", new_callable=AsyncMock),
+        patch.object(type(app.bot), "send_chat_action", new_callable=AsyncMock),
+        patch(
+            "ccgram.bot._capture_command_probe_context",
+            new_callable=AsyncMock,
+            return_value=(None, None, None),
+        ),
+        patch("ccgram.bot._maybe_send_codex_status_snapshot", new_callable=AsyncMock),
+        patch("ccgram.bot._spawn_command_failure_probe"),
     ):
         await app.process_update(update)
 
