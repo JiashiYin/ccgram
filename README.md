@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/github/license/alexei-led/ccgram)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Control AI coding agents from your phone. CCGram bridges Telegram to tmux so you can monitor output, respond to prompts, and manage sessions without touching your computer. This fork packages that bridge as **CCGram Notify**: a Codex-first install flow that makes normal `codex` launches enter the monitored workflow in quiet `notify` mode, while Telegram-opened sessions stay fully `interactive`.
+Control AI coding agents from your phone. CCGram bridges Telegram to running agent sessions so you can monitor output, respond to prompts, and manage work without touching your computer. This fork packages that bridge as **CCGram Notify**: a Codex-first install flow that keeps normal local `codex` launches in your native terminal while surfacing blocker prompts to Telegram in quiet `notify` mode, and keeps Telegram-opened sessions fully `interactive`.
 
 CCGram Notify still supports [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), and plain shell sessions with LLM command generation.
 
@@ -187,7 +187,7 @@ ccgram notify install \
   --group-id "-1001234567890"
 ```
 
-After this one-time step, typing plain `codex` routes into the monitored tmux workflow and defaults to `notify`.
+After this one-time step, typing plain `codex` stays in your normal terminal and defaults to `notify`.
 The installer also starts the local `ccgram` background bridge for you, and plain `codex` launches re-check it on demand so daily shutdown/reboot cycles do not require manual recovery.
 
 ### Install hooks (Claude Code only)
@@ -226,9 +226,15 @@ After `ccgram notify install`, normal `codex` launches default to `notify`:
 codex
 ```
 
-That launch enters the monitored tmux workflow, ensures the local background bridge is running, can proactively message you in Telegram when it blocks, and still supports phone-side approvals through the existing interactive UI bridge.
+That launch stays in your native terminal, ensures the local background bridge is running, can proactively message you in Telegram when it blocks, and still supports phone-side approvals through the existing interactive UI bridge.
 
 Telegram-created sessions stay `interactive`, so the user-opened topic remains fully chatty like a remote terminal.
+
+If you explicitly want the tmux-backed remote-terminal experience locally, use:
+
+```bash
+codex-interactive
+```
 
 ### Notify Management
 

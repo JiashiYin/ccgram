@@ -98,18 +98,25 @@ def setup_logging(log_level: str) -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def run_bot() -> None:
-    """Start the bot. Called by the ``run`` Click command after env is set."""
-    log_level = (
-        os.environ.get("CCGRAM_LOG_LEVEL")
-        or os.environ.get("CCBOT_LOG_LEVEL")
-        or "INFO"
-    ).upper()
-    setup_logging(log_level)
+def _acquire_single_instance_lock() -> None:
+    """Abort startup if another bot instance already owns this config dir."""
+    from .instance_lock import (
+        InstanceAlreadyRunningError,
+        acquire_instance_lock,
+    )
 
-    # --- Auto-detect tmux session (before config import) ---
+    try:
+        acquire_instance_lock()
+    except InstanceAlreadyRunningError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _resolve_tmux_context() -> tuple[bool, str | None]:
+    """Auto-detect tmux session/window when running inside tmux."""
     explicit_session = os.environ.get("TMUX_SESSION_NAME")
     auto_detected = False
+    own_wid = None
 
     if not explicit_session and os.environ.get("TMUX"):
         from .utils import check_duplicate_ccgram, detect_tmux_context
@@ -123,8 +130,20 @@ def run_bot() -> None:
         if dup:
             print(f"Error: {dup}", file=sys.stderr)
             sys.exit(1)
-    else:
-        own_wid = None
+
+    return auto_detected, own_wid
+
+
+def run_bot() -> None:
+    """Start the bot. Called by the ``run`` Click command after env is set."""
+    log_level = (
+        os.environ.get("CCGRAM_LOG_LEVEL")
+        or os.environ.get("CCBOT_LOG_LEVEL")
+        or "INFO"
+    ).upper()
+    setup_logging(log_level)
+
+    auto_detected, own_wid = _resolve_tmux_context()
 
     try:
         from .config import config
@@ -144,6 +163,10 @@ def run_bot() -> None:
 
     if own_wid:
         config.own_window_id = own_wid
+
+    from .instance_lock import release_instance_lock
+
+    _acquire_single_instance_lock()
 
     logger = structlog.get_logger()
 
@@ -170,16 +193,19 @@ def run_bot() -> None:
     logger.info("Starting ccgram %s%s", __version__, dev)
     from .bot import create_bot
 
-    application = create_bot()
-    _install_signal_handlers()
-    application.run_polling(
-        allowed_updates=["message", "callback_query"],
-        stop_signals=None,
-    )
+    try:
+        application = create_bot()
+        _install_signal_handlers()
+        application.run_polling(
+            allowed_updates=["message", "callback_query"],
+            stop_signals=None,
+        )
 
-    if _restart_requested:
-        logger.info("Restarting bot via os.execv(%s)", sys.argv)
-        os.execv(sys.argv[0], sys.argv)
+        if _restart_requested:
+            logger.info("Restarting bot via os.execv(%s)", sys.argv)
+            os.execv(sys.argv[0], sys.argv)
+    finally:
+        release_instance_lock()
 
     _reraise_shutdown_signal()
 

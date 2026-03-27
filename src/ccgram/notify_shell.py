@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -210,6 +211,44 @@ def _render_direct_launcher(command: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _capture_existing_shell_function(provider: str, shell: str) -> str:
+    if shell != "bash":
+        return ""
+    try:
+        proc = subprocess.run(
+            ["bash", "-ic", f"declare -f {provider}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except OSError:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _command_from_shell_function(provider: str, function_text: str) -> str:
+    if not function_text or "ccgram notify launch" in function_text:
+        return ""
+    compact = " ".join(
+        line.strip().rstrip("\\")
+        for line in function_text.splitlines()
+        if line.strip() and line.strip() not in {"{", "}"}
+    )
+    marker = f"command {provider}"
+    idx = compact.find(marker)
+    if idx == -1:
+        return ""
+    suffix = compact[idx + len(marker) :].strip()
+    suffix = suffix.removesuffix('"$@"').strip()
+    suffix = suffix.removesuffix('"$@"').strip()
+    suffix = suffix.removesuffix("$@").strip()
+    path = shutil.which(provider) or provider
+    return f"{path} {suffix}".strip() if suffix else path
+
+
 def _write_direct_launcher(path: Path, command: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_render_direct_launcher(command))
@@ -221,7 +260,10 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
     if shell == "fish":
         return (
             f"function {provider}\n"
-            f"    command ccgram notify launch --provider {provider} --attach -- $argv\n"
+            f"    command ccgram notify launch --provider {provider} --mode notify -- $argv\n"
+            "end\n\n"
+            f"function {provider}-interactive\n"
+            f"    command ccgram notify launch --provider {provider} --mode interactive --attach -- $argv\n"
             "end\n\n"
             f"function {provider}-direct\n"
             f"    command {quoted_direct} $argv\n"
@@ -229,7 +271,10 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
         )
     return (
         f"{provider}() {{\n"
-        f'  command ccgram notify launch --provider {provider} --attach -- "$@"\n'
+        f'  command ccgram notify launch --provider {provider} --mode notify -- "$@"\n'
+        "}\n\n"
+        f"{provider}-interactive() {{\n"
+        f'  command ccgram notify launch --provider {provider} --mode interactive --attach -- "$@"\n'
         "}\n\n"
         f"alias {provider}-direct={quoted_direct}\n"
     )
@@ -242,12 +287,24 @@ def _write_shell_wrapper(
     path.write_text(_shell_wrapper(provider, shell, direct_path))
 
 
-def _resolve_direct_command(provider: str, existing: dict[str, object] | None) -> str:
+def _resolve_direct_command(
+    provider: str,
+    existing: dict[str, object] | None,
+    *,
+    shell_name: str,
+) -> str:
     env_key = _env_key(provider)
     direct_path = _direct_launcher_path(provider)
     override = os.environ.get(env_key, "")
     if override and override != str(direct_path):
         return override
+
+    function_command = _command_from_shell_function(
+        provider,
+        _capture_existing_shell_function(provider, shell_name),
+    )
+    if function_command:
+        return function_command
 
     if existing:
         direct_command = existing.get("direct_command", "")
@@ -275,7 +332,11 @@ def install_notify_shell(
     assert isinstance(providers, dict)
     existing = providers.get(provider)
     existing_dict = existing if isinstance(existing, dict) else None
-    direct_command = _resolve_direct_command(provider, existing_dict)
+    direct_command = _resolve_direct_command(
+        provider,
+        existing_dict,
+        shell_name=shell_name,
+    )
 
     if existing_dict:
         old_rc_path = (

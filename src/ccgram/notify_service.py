@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .instance_lock import get_running_instance_pid
 from .utils import atomic_write_json, ccgram_dir
 
 _STATE_FILE = "notify-service.json"
@@ -29,6 +30,7 @@ class NotifyServiceStatus:
     pid: int | None
     log_path: str
     command: list[str]
+    managed: bool
 
 
 def _state_path() -> Path:
@@ -92,6 +94,7 @@ def get_notify_service_status() -> NotifyServiceStatus:
     enabled = bool(raw.get("enabled", False))
     pid_raw = raw.get("pid")
     pid = pid_raw if isinstance(pid_raw, int) and pid_raw > 0 else None
+    managed = bool(raw.get("managed", pid is not None))
     running = pid is not None and _pid_is_running(pid)
     command = raw.get("command")
     log_path = str(raw.get("log_path", "")) or str(_default_log_path())
@@ -102,6 +105,7 @@ def get_notify_service_status() -> NotifyServiceStatus:
         pid=pid if running else None,
         log_path=log_path,
         command=list(command) if isinstance(command, list) else [],
+        managed=managed,
     )
 
 
@@ -111,12 +115,36 @@ def ensure_notify_service_running() -> NotifyServiceStatus:
     log_path = Path(status.log_path or str(_default_log_path()))
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    existing_pid = get_running_instance_pid()
+    if existing_pid is not None:
+        managed = status.running and status.pid == existing_pid and status.managed
+        _save_state(
+            {
+                "installed": True,
+                "enabled": True,
+                "pid": existing_pid,
+                "managed": managed,
+                "log_path": str(log_path),
+                "command": command,
+            }
+        )
+        return NotifyServiceStatus(
+            installed=True,
+            enabled=True,
+            running=True,
+            pid=existing_pid,
+            log_path=str(log_path),
+            command=command,
+            managed=managed,
+        )
+
     if status.running and status.pid is not None:
         _save_state(
             {
                 "installed": True,
                 "enabled": True,
                 "pid": status.pid,
+                "managed": status.managed,
                 "log_path": str(log_path),
                 "command": command,
             }
@@ -128,6 +156,7 @@ def ensure_notify_service_running() -> NotifyServiceStatus:
             pid=status.pid,
             log_path=str(log_path),
             command=command,
+            managed=status.managed,
         )
 
     env = os.environ.copy()
@@ -152,6 +181,7 @@ def ensure_notify_service_running() -> NotifyServiceStatus:
             "installed": True,
             "enabled": True,
             "pid": process.pid,
+            "managed": True,
             "log_path": str(log_path),
             "command": command,
         }
@@ -163,13 +193,14 @@ def ensure_notify_service_running() -> NotifyServiceStatus:
         pid=process.pid,
         log_path=str(log_path),
         command=command,
+        managed=True,
     )
 
 
 def disable_notify_service() -> NotifyServiceStatus:
     raw = _load_state()
     status = get_notify_service_status()
-    if status.running and status.pid is not None:
+    if status.running and status.pid is not None and status.managed:
         with contextlib.suppress(OSError):
             os.kill(status.pid, signal.SIGTERM)
         if not _wait_for_pid_exit(status.pid):
@@ -182,6 +213,7 @@ def disable_notify_service() -> NotifyServiceStatus:
             "installed": bool(raw.get("installed", False)),
             "enabled": False,
             "pid": None,
+            "managed": False,
             "log_path": raw.get("log_path", str(_default_log_path())),
             "command": raw.get("command", []),
         }
@@ -201,6 +233,7 @@ def uninstall_notify_service() -> NotifyServiceStatus:
         pid=None,
         log_path=status.log_path,
         command=status.command,
+        managed=False,
     )
 
 

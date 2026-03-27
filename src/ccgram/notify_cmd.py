@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from .native_sessions import run_native_notify_session
 from .notify_onboarding import persist_telegram_setup, resolve_telegram_setup
 from .notify_service import (
     disable_notify_service,
@@ -91,7 +92,7 @@ def _select_and_attach_window(window_id: str) -> None:
     )
 
 
-async def _launch_session(
+async def _launch_tmux_session(
     *,
     provider: str,
     cwd: str,
@@ -99,7 +100,6 @@ async def _launch_session(
     attach: bool,
     agent_args: str,
 ) -> tuple[str, str]:
-    ensure_notify_service_running()
     launch_command = resolve_notify_launch_command(provider)
     success, message, _window_name, window_id = await tmux_manager.create_window(
         work_dir=cwd,
@@ -159,6 +159,9 @@ def notify_install_cmd(
     )
     dotenv_path = persist_telegram_setup(setup)
     status = install_notify_shell(provider=provider, shell=shell_name)
+    existing_service = get_notify_service_status()
+    if existing_service.running and existing_service.managed:
+        disable_notify_service()
     service_status = ensure_notify_service_running()
     print(f"Stored Telegram config in {dotenv_path}.")
     print(
@@ -226,14 +229,32 @@ def notify_launch_cmd(
     attach: bool,
     agent_args: tuple[str, ...],
 ) -> None:
-    """Launch a provider session inside the monitored tmux workflow."""
-    window_id, message = asyncio.run(
-        _launch_session(
+    """Launch a provider session in notify or interactive mode."""
+    resolved_cwd = str(cwd.resolve())
+    agent_text = shlex.join(list(agent_args))
+
+    ensure_notify_service_running()
+
+    if mode == "notify":
+        if attach:
+            raise click.ClickException(
+                "Notify mode keeps the native terminal. Use --mode interactive for tmux attach."
+            )
+        run_native_notify_session(
             provider=provider,
-            cwd=str(cwd.resolve()),
+            cwd=resolved_cwd,
+            launch_command=resolve_notify_launch_command(provider),
+            agent_args=agent_text,
+        )
+        return
+
+    window_id, message = asyncio.run(
+        _launch_tmux_session(
+            provider=provider,
+            cwd=resolved_cwd,
             mode=mode,
             attach=attach,
-            agent_args=shlex.join(list(agent_args)),
+            agent_args=agent_text,
         )
     )
     print(f"{message} [{window_id}]")

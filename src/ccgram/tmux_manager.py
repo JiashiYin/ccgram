@@ -26,6 +26,14 @@ import libtmux
 from libtmux.exc import LibTmuxException
 
 from .config import config
+from .native_sessions import (
+    capture_native_pane,
+    capture_native_pane_raw,
+    get_native_window,
+    is_native_window,
+    list_native_windows,
+    send_native_keys,
+)
 from .providers import detect_provider_from_command
 from .window_resolver import EMDASH_SESSION_PREFIX as _EMDASH_PREFIX, is_foreign_window
 
@@ -208,7 +216,20 @@ class TmuxManager:
 
             return windows
 
-        return await asyncio.to_thread(_sync_list_windows)
+        windows = await asyncio.to_thread(_sync_list_windows)
+        windows.extend(
+            TmuxWindow(
+                window_id=w.window_id,
+                window_name=w.window_name,
+                cwd=w.cwd,
+                pane_current_command=w.pane_current_command,
+                pane_tty=w.pane_tty,
+                pane_width=w.pane_width,
+                pane_height=w.pane_height,
+            )
+            for w in list_native_windows()
+        )
+        return windows
 
     async def find_window_by_name(self, window_name: str) -> TmuxWindow | None:
         """Find a window by its name.
@@ -237,6 +258,19 @@ class TmuxManager:
         Returns:
             TmuxWindow if found, None otherwise
         """
+        if is_native_window(window_id):
+            native = get_native_window(window_id)
+            if not native:
+                return None
+            return TmuxWindow(
+                window_id=native.window_id,
+                window_name=native.window_name,
+                cwd=native.cwd,
+                pane_current_command=native.pane_current_command,
+                pane_tty=native.pane_tty,
+                pane_width=native.pane_width,
+                pane_height=native.pane_height,
+            )
         if is_foreign_window(window_id):
             return await self._find_foreign_window(window_id)
         windows = await self.list_windows()
@@ -303,6 +337,8 @@ class TmuxManager:
             The captured text (stripped of trailing whitespace),
             or None on failure or empty content.
         """
+        if is_native_window(window_id):
+            return capture_native_pane(window_id, with_ansi=with_ansi)
         if with_ansi:
             return await self._capture_pane_ansi(window_id)
 
@@ -314,6 +350,8 @@ class TmuxManager:
         Returns (raw_text, columns, rows) or None on failure. The raw text
         includes ANSI escape sequences suitable for feeding into pyte.
         """
+        if is_native_window(window_id):
+            return capture_native_pane_raw(window_id)
         proc: asyncio.subprocess.Process | None = None
         try:
             # Get dimensions and capture in one shell command
@@ -405,6 +443,8 @@ class TmuxManager:
         Some CLIs (e.g. Gemini) broadcast state via OSC escape sequences
         that set the terminal title. Returns empty string on failure.
         """
+        if is_native_window(window_id):
+            return ""
         proc: asyncio.subprocess.Process | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -659,6 +699,13 @@ class TmuxManager:
         Returns:
             True if successful, False otherwise
         """
+        if is_native_window(window_id):
+            return send_native_keys(
+                window_id,
+                text,
+                enter=enter,
+                literal=literal,
+            )
         if literal and enter and not raw:
             return await self._send_literal_then_enter(window_id, text)
 

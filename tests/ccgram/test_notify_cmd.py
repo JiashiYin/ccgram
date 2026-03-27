@@ -42,6 +42,7 @@ def _stub_notify_service(monkeypatch, tmp_path: Path) -> None:
         "enabled": False,
         "running": False,
         "pid": None,
+        "managed": False,
         "log_path": str(tmp_path / "notify.log"),
         "command": ["/usr/bin/ccgram", "run"],
     }
@@ -56,12 +57,21 @@ def _stub_notify_service(monkeypatch, tmp_path: Path) -> None:
                 "enabled": True,
                 "running": True,
                 "pid": 4321,
+                "managed": True,
             }
         )
         return _status()
 
     def _disable() -> SimpleNamespace:
-        state.update({"installed": True, "enabled": False, "running": False, "pid": None})
+        state.update(
+            {
+                "installed": True,
+                "enabled": False,
+                "running": False,
+                "pid": None,
+                "managed": False,
+            }
+        )
         return _status()
 
     def _uninstall() -> SimpleNamespace:
@@ -71,6 +81,7 @@ def _stub_notify_service(monkeypatch, tmp_path: Path) -> None:
                 "enabled": False,
                 "running": False,
                 "pid": None,
+                "managed": False,
             }
         )
         return _status()
@@ -104,6 +115,7 @@ class TestNotifyInstall:
                 enabled=True,
                 running=True,
                 pid=4321,
+                managed=True,
                 log_path=str(tmp_path / "notify.log"),
             )
         )
@@ -118,6 +130,62 @@ class TestNotifyInstall:
         )
 
         assert result.exit_code == 0
+        ensure_service.assert_called_once_with()
+
+    def test_install_restarts_existing_managed_service(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        ensure_service = MagicMock(
+            return_value=SimpleNamespace(
+                installed=True,
+                enabled=True,
+                running=True,
+                pid=4321,
+                managed=True,
+                log_path=str(tmp_path / "notify.log"),
+                command=["/usr/bin/ccgram", "run"],
+            )
+        )
+        disable_service = MagicMock()
+        get_status = MagicMock(
+            return_value=SimpleNamespace(
+                installed=True,
+                enabled=True,
+                running=True,
+                pid=1111,
+                managed=True,
+                log_path=str(tmp_path / "notify.log"),
+                command=["/usr/bin/ccgram", "run"],
+            )
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.get_notify_service_status",
+            get_status,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.disable_notify_service",
+            disable_service,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.ensure_notify_service_running",
+            ensure_service,
+            raising=False,
+        )
+
+        result = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+
+        assert result.exit_code == 0
+        assert get_status.call_count >= 1
+        disable_service.assert_called_once_with()
         ensure_service.assert_called_once_with()
 
     def test_install_prompts_for_missing_telegram_config_and_persists_it(
@@ -243,7 +311,8 @@ class TestNotifyInstall:
         assert direct_path.exists()
 
         snippet = snippet_path.read_text()
-        assert 'ccgram notify launch --provider codex --attach -- "$@"' in snippet
+        assert 'ccgram notify launch --provider codex --mode notify -- "$@"' in snippet
+        assert 'ccgram notify launch --provider codex --mode interactive --attach -- "$@"' in snippet
         assert "codex-direct" in snippet
 
         rc_text = (tmp_path / ".bashrc").read_text()
@@ -366,6 +435,92 @@ class TestNotifyInstall:
         direct_launcher = _direct_launcher_path(tmp_path, "codex")
         assert "/opt/codex/bin/codex --fast" in direct_launcher.read_text()
 
+    def test_install_preserves_simple_existing_bash_function_flags(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        function_text = """codex ()
+{
+    command codex --full-auto \\
+        --add-dir /home/jacob/.agents/skills \\
+        --add-dir /home/jacob/.codex/rules \\
+        \"$@\"
+}
+"""
+
+        def _run(*_args, **_kwargs):
+            return SimpleNamespace(returncode=0, stdout=function_text, stderr="")
+
+        monkeypatch.setattr("ccgram.notify_shell.subprocess.run", _run)
+        monkeypatch.setattr(
+            "ccgram.notify_shell.shutil.which",
+            lambda name: f"/usr/bin/{name}",
+        )
+
+        result = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+
+        assert result.exit_code == 0
+        direct_launcher = _direct_launcher_path(tmp_path, "codex")
+        launcher_text = direct_launcher.read_text()
+        assert "/usr/bin/codex --full-auto" in launcher_text
+        assert "--add-dir /home/jacob/.agents/skills" in launcher_text
+        assert "--add-dir /home/jacob/.codex/rules" in launcher_text
+
+    def test_reinstall_refreshes_direct_command_from_bash_function_when_state_is_stale(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        state = {
+            "providers": {
+                "codex": {
+                    "provider": "codex",
+                    "enabled": False,
+                    "shell": "bash",
+                    "mode": "notify",
+                    "rc_path": str(tmp_path / ".bashrc"),
+                    "snippet_path": str(_notify_snippet_path(tmp_path, "codex", "bash")),
+                    "direct_launcher_path": str(_direct_launcher_path(tmp_path, "codex")),
+                    "direct_command": "/usr/bin/codex",
+                }
+            }
+        }
+        _notify_state_path(tmp_path).write_text(json.dumps(state))
+
+        function_text = """codex ()
+{
+    command codex --full-auto \\
+        --add-dir /home/jacob/.agents/skills \\
+        \"$@\"
+}
+"""
+
+        def _run(*_args, **_kwargs):
+            return SimpleNamespace(returncode=0, stdout=function_text, stderr="")
+
+        monkeypatch.setattr("ccgram.notify_shell.subprocess.run", _run)
+        monkeypatch.setattr(
+            "ccgram.notify_shell.shutil.which",
+            lambda name: f"/usr/bin/{name}",
+        )
+
+        result = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+
+        assert result.exit_code == 0
+        launcher_text = _direct_launcher_path(tmp_path, "codex").read_text()
+        assert "/usr/bin/codex --full-auto" in launcher_text
+
     def test_resolve_notify_launch_command_prefers_installed_direct_launcher(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -393,17 +548,12 @@ class TestNotifyLaunch:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
 
-        create_window = AsyncMock(return_value=(True, "Created window", "proj", "@12"))
-        stamp_pane_title = AsyncMock()
+        run_native = MagicMock(return_value=("native:1", "Started native session"))
         ensure_service = MagicMock()
 
         monkeypatch.setattr(
-            "ccgram.notify_cmd.tmux_manager.create_window", create_window
+            "ccgram.notify_cmd.run_native_notify_session", run_native
         )
-        monkeypatch.setattr(
-            "ccgram.notify_cmd.tmux_manager.stamp_pane_title", stamp_pane_title
-        )
-        monkeypatch.setattr("ccgram.notify_cmd.session_manager", MagicMock())
         monkeypatch.setattr(
             "ccgram.notify_cmd.resolve_notify_launch_command",
             lambda provider: "/usr/bin/codex",
@@ -428,8 +578,53 @@ class TestNotifyLaunch:
 
         assert result.exit_code == 0
         ensure_service.assert_called_once_with()
+        run_native.assert_called_once()
 
-    def test_launch_creates_window_and_sets_notify_mode(
+    def test_launch_notify_mode_runs_native_session(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+        run_native = MagicMock(return_value=("native:1", "Started native session"))
+        create_window = AsyncMock()
+
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.run_native_notify_session", run_native
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.tmux_manager.create_window", create_window
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.resolve_notify_launch_command",
+            lambda provider: "/usr/bin/codex",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "notify",
+                "launch",
+                "--provider",
+                "codex",
+                "--cwd",
+                str(tmp_path),
+                "--",
+                "--model",
+                "gpt-5",
+            ],
+        )
+
+        assert result.exit_code == 0
+        run_native.assert_called_once_with(
+            provider="codex",
+            cwd=str(tmp_path.resolve()),
+            launch_command="/usr/bin/codex",
+            agent_args="--model gpt-5",
+        )
+        create_window.assert_not_called()
+
+    def test_launch_interactive_mode_creates_tmux_window(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         runner = CliRunner()
@@ -462,6 +657,8 @@ class TestNotifyLaunch:
                 "launch",
                 "--provider",
                 "codex",
+                "--mode",
+                "interactive",
                 "--cwd",
                 str(tmp_path),
                 "--attach",
@@ -480,7 +677,9 @@ class TestNotifyLaunch:
         session_manager.set_window_provider.assert_called_once_with(
             "@12", "codex", cwd=str(tmp_path)
         )
-        session_manager.set_notification_mode.assert_called_once_with("@12", "notify")
+        session_manager.set_notification_mode.assert_called_once_with(
+            "@12", "interactive"
+        )
         stamp_pane_title.assert_awaited_once_with("@12", "codex")
         select_window.assert_called_once_with("@12")
 
@@ -527,6 +726,8 @@ class TestNotifyLaunch:
                     "launch",
                     "--provider",
                     provider_name,
+                    "--mode",
+                    "interactive",
                     "--cwd",
                     str(tmp_path),
                 ],
@@ -540,7 +741,7 @@ class TestNotifyLaunch:
 
         assert result.exit_code == 0
         assert session_manager.get_window_state("@12").provider_name == provider_name
-        assert session_manager.get_notification_mode("@12") == "notify"
+        assert session_manager.get_notification_mode("@12") == "interactive"
         stamp_pane_title.assert_awaited_once_with("@12", provider_name)
 
     def test_attach_uses_interactive_tmux_calls(self, monkeypatch) -> None:
@@ -581,6 +782,7 @@ class TestNotifyStatusMain:
                 enabled=True,
                 running=True,
                 pid=4321,
+                managed=True,
                 log_path=str(tmp_path / "notify.log"),
                 command=["/usr/bin/ccgram", "run"],
             ),

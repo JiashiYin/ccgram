@@ -888,8 +888,6 @@ class TestProbeFailures:
         _get_window_state("@5").probe_failures = 1
         bot = AsyncMock(spec=Bot)
         bot.unpin_all_forum_topic_messages.side_effect = BadRequest("Topic_id_invalid")
-        mock_window = MagicMock()
-        mock_window.window_id = "@5"
         with (
             patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
             patch("ccgram.handlers.status_polling.tmux_manager") as mock_tm,
@@ -900,15 +898,9 @@ class TestProbeFailures:
         ):
             mock_sm.iter_thread_bindings.return_value = [(1, 42, "@5")]
             mock_sm.resolve_chat_id.return_value = -100
-            mock_tm.find_window_by_id = AsyncMock(
-                return_value=mock_window if window_alive else None
-            )
-            mock_tm.kill_window = AsyncMock()
+            mock_sm.get_notification_mode.return_value = "interactive"
             await _probe_topic_existence(bot)
-        if window_alive:
-            mock_tm.kill_window.assert_called_once_with("@5")
-        else:
-            mock_tm.kill_window.assert_not_called()
+        mock_tm.kill_window.assert_not_called()
         mock_cleanup.assert_called_once_with(1, 42, bot, window_id="@5")
         mock_sm.unbind_thread.assert_called_once_with(1, 42)
         assert (
@@ -1762,12 +1754,35 @@ class TestDeadWindowNotification:
             pytest.param("Bad Request: Thread not found", id="thread-variant"),
         ],
     )
-    async def test_probe_cleans_up_on_thread_not_found(self, error_msg: str) -> None:
-        """Probe handles thread-not-found variants by cleaning up the binding."""
+    async def test_probe_recreates_notify_topic_on_thread_not_found(
+        self, error_msg: str
+    ) -> None:
+        """Notify topics self-heal instead of killing the running session."""
         bot = AsyncMock(spec=Bot)
         bot.unpin_all_forum_topic_messages.side_effect = BadRequest(error_msg)
-        mock_window = MagicMock()
-        mock_window.window_id = "@5"
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccgram.handlers.status_polling.tmux_manager") as mock_tm,
+            patch(
+                "ccgram.handlers.status_polling.recreate_notify_topic_binding",
+                new_callable=AsyncMock,
+                return_value=77,
+            ) as mock_recreate,
+        ):
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@5")]
+            mock_sm.resolve_chat_id.return_value = -100
+            mock_sm.get_notification_mode.return_value = "notify"
+            await _probe_topic_existence(bot)
+
+        mock_recreate.assert_called_once_with(bot, 1, "@5", 42)
+        mock_tm.kill_window.assert_not_called()
+        mock_sm.unbind_thread.assert_not_called()
+
+    async def test_probe_unbinds_interactive_topic_without_killing_window(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        bot.unpin_all_forum_topic_messages.side_effect = BadRequest(
+            "Message thread not found"
+        )
         with (
             patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
             patch("ccgram.handlers.status_polling.tmux_manager") as mock_tm,
@@ -1778,11 +1793,10 @@ class TestDeadWindowNotification:
         ):
             mock_sm.iter_thread_bindings.return_value = [(1, 42, "@5")]
             mock_sm.resolve_chat_id.return_value = -100
-            mock_tm.find_window_by_id = AsyncMock(return_value=mock_window)
-            mock_tm.kill_window = AsyncMock()
+            mock_sm.get_notification_mode.return_value = "interactive"
             await _probe_topic_existence(bot)
 
-        mock_tm.kill_window.assert_called_once_with("@5")
+        mock_tm.kill_window.assert_not_called()
         mock_cleanup.assert_called_once_with(1, 42, bot, window_id="@5")
         mock_sm.unbind_thread.assert_called_once_with(1, 42)
 

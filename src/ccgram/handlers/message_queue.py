@@ -36,7 +36,8 @@ from .callback_data import (
     CB_STATUS_SCREENSHOT,
     NOTIFY_MODE_ICONS,
 )
-from .message_sender import edit_with_fallback, rate_limit_send_message
+from .message_sender import edit_with_fallback, rate_limit_send_message  # noqa: F401
+from .topic_delivery import recover_failed_bound_message_delivery
 
 # Top-level loop resilience: catch any error to keep the worker alive
 _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
@@ -411,13 +412,17 @@ async def _process_batch_task(bot: Bot, user_id: int, task: MessageTask) -> None
     if batch.telegram_msg_id is None:
         # Clear status message first, then send new batch message
         await _do_clear_status_message(bot, user_id, thread_id)
-        sent = await rate_limit_send_message(
+        sent, new_thread_id = await _send_bound_message(
             bot,
-            chat_id,
-            batch_text,
-            **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
+            user_id=user_id,
+            window_id=window_id,
+            thread_id=task.thread_id,
+            text=batch_text,
         )
         if sent:
+            if new_thread_id is not None and new_thread_id != thread_id:
+                _active_batches[(user_id, new_thread_id)] = _active_batches.pop(bkey)
+                batch.thread_id = new_thread_id
             batch.telegram_msg_id = sent.message_id
     else:
         # Edit existing batch message with entity-based formatting
@@ -446,11 +451,12 @@ async def _flush_batch(bot: Bot, user_id: int, thread_id_or_0: int) -> None:
 
     if batch.telegram_msg_id is None:
         # First send failed earlier — attempt one send before dropping
-        await rate_limit_send_message(
+        await _send_bound_message(
             bot,
-            chat_id,
-            batch_text,
-            **_send_kwargs(thread_id),  # type: ignore[arg-type]
+            user_id=user_id,
+            window_id=batch.window_id,
+            thread_id=thread_id,
+            text=batch_text,
         )
         return
 
@@ -566,26 +572,19 @@ async def _message_queue_worker(bot: Bot, user_id: int) -> None:
             )
 
 
-def _send_kwargs(thread_id: int | None) -> dict[str, int]:
-    """Build message_thread_id kwargs for bot.send_message()."""
-    if thread_id is not None:
-        return {"message_thread_id": thread_id}
-    return {}
-
-
 async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> None:
     """Process a content message task."""
     window_id = task.window_id or ""
-    thread_id = task.thread_id or 0
-    chat_id = session_manager.resolve_chat_id(user_id, task.thread_id)
+    current_thread_id = task.thread_id
+    chat_id = session_manager.resolve_chat_id(user_id, current_thread_id)
 
     # 1. Handle tool_result editing (merged parts are edited together)
     if task.content_type == "tool_result" and task.tool_use_id:
-        _tkey = (task.tool_use_id, user_id, thread_id)
+        _tkey = (task.tool_use_id, user_id, current_thread_id or 0)
         edit_msg_id = _tool_msg_ids.pop(_tkey, None)
         if edit_msg_id is not None:
             # Clear status message first
-            await _do_clear_status_message(bot, user_id, thread_id)
+            await _do_clear_status_message(bot, user_id, current_thread_id or 0)
             # Join all parts for editing (merged content goes together)
             full_text = "\n\n".join(task.parts)
             success = await edit_with_fallback(
@@ -612,7 +611,7 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
             converted_msg_id = await _convert_status_to_content(
                 bot,
                 user_id,
-                thread_id,
+                current_thread_id or 0,
                 window_id,
                 part,
             )
@@ -620,19 +619,23 @@ async def _process_content_task(bot: Bot, user_id: int, task: MessageTask) -> No
                 last_msg_id = converted_msg_id
                 continue
 
-        sent = await rate_limit_send_message(
+        sent, new_thread_id = await _send_bound_message(
             bot,
-            chat_id,
-            part,
-            **_send_kwargs(task.thread_id),  # type: ignore[arg-type]
+            user_id=user_id,
+            window_id=window_id,
+            thread_id=current_thread_id,
+            text=part,
         )
+        if new_thread_id is not None:
+            current_thread_id = new_thread_id
+            chat_id = session_manager.resolve_chat_id(user_id, current_thread_id)
 
         if sent:
             last_msg_id = sent.message_id
 
     # 3. Record tool_use message ID for later editing
     if last_msg_id and task.tool_use_id and task.content_type == "tool_use":
-        _tool_msg_ids[(task.tool_use_id, user_id, thread_id)] = last_msg_id
+        _tool_msg_ids[(task.tool_use_id, user_id, current_thread_id or 0)] = last_msg_id
 
     # Status will be recreated by the 1-second poll loop — no need to
     # eagerly send a new status message here (doing so caused pile-up).
@@ -780,15 +783,62 @@ async def _do_send_status_message(
             # Different window — delete old status first
             await _do_clear_status_message(bot, user_id, thread_id_or_0)
 
+    sent, new_thread_id = await _send_bound_message(
+        bot,
+        user_id=user_id,
+        window_id=window_id,
+        thread_id=thread_id,
+        text=text,
+        reply_markup=keyboard,
+    )
+    if sent:
+        active_thread_id = new_thread_id if new_thread_id is not None else thread_id
+        _status_msg_info[(user_id, active_thread_id or 0)] = (
+            sent.message_id,
+            window_id,
+            text,
+        )
+
+
+async def _send_bound_message(
+    bot: Bot,
+    *,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+    text: str,
+    **kwargs: object,
+) -> tuple[object | None, int | None]:
+    """Send queue-owned content/status, healing deleted notify topics if needed."""
+    chat_id = session_manager.resolve_chat_id(user_id, thread_id)
     sent = await rate_limit_send_message(
         bot,
         chat_id,
         text,
-        reply_markup=keyboard,
-        **_send_kwargs(thread_id),  # type: ignore[arg-type]
+        message_thread_id=thread_id,
+        **kwargs,
     )
-    if sent:
-        _status_msg_info[skey] = (sent.message_id, window_id, text)
+    if sent is not None or thread_id is None:
+        return sent, thread_id
+
+    new_thread_id = await recover_failed_bound_message_delivery(
+        bot,
+        user_id=user_id,
+        window_id=window_id,
+        thread_id=thread_id,
+    )
+    if new_thread_id is None:
+        return None, thread_id
+
+    new_chat_id = session_manager.resolve_chat_id(user_id, new_thread_id)
+    resent = await rate_limit_send_message(
+        bot,
+        new_chat_id,
+        text,
+        message_thread_id=new_thread_id,
+        **kwargs,
+    )
+    return resent, new_thread_id
 
 
 async def _do_clear_status_message(

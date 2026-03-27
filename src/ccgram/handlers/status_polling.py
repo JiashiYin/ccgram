@@ -69,6 +69,7 @@ from .message_queue import (
 )
 from .message_sender import rate_limit_send_message
 from .recovery_callbacks import build_recovery_keyboard
+from .topic_delivery import recreate_notify_topic_binding
 from .topic_emoji import update_topic_emoji
 
 # Top-level loop resilience: catch any error to keep polling alive
@@ -1038,18 +1039,26 @@ async def _probe_topic_existence(bot: Bot) -> None:
                 "Topic_id_invalid" in e.message
                 or "thread not found" in e.message.lower()
             ):
-                # Topic deleted — kill window, unbind, and clean up state
-                w = await tmux_manager.find_window_by_id(wid)
-                if w:
-                    await tmux_manager.kill_window(w.window_id)
                 _get_window_state(wid).probe_failures = 0
+                if session_manager.get_notification_mode(wid) == "notify":
+                    new_thread_id = await recreate_notify_topic_binding(
+                        bot, user_id, wid, thread_id
+                    )
+                    if new_thread_id is not None:
+                        logger.info(
+                            "Topic deleted: recreated notify thread %d -> %d for window %s user %d",
+                            thread_id,
+                            new_thread_id,
+                            wid,
+                            user_id,
+                        )
+                        continue
                 await clear_topic_state(user_id, thread_id, bot, window_id=wid)
                 session_manager.unbind_thread(user_id, thread_id)
                 logger.info(
-                    "Topic deleted: killed window_id '%s' and "
-                    "unbound thread %d for user %d",
-                    wid,
+                    "Topic deleted: cleared thread %d for window %s user %d",
                     thread_id,
+                    wid,
                     user_id,
                 )
             else:

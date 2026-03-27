@@ -18,7 +18,7 @@ import contextlib
 import structlog
 import time
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from ..providers import get_provider_for_window
@@ -35,7 +35,8 @@ from .callback_data import (
     CB_ASK_TAB,
     CB_ASK_UP,
 )
-from .message_sender import NO_LINK_PREVIEW, rate_limit_send
+from .message_sender import NO_LINK_PREVIEW
+from .topic_delivery import send_plain_bound_message
 
 logger = structlog.get_logger()
 
@@ -276,30 +277,28 @@ async def handle_interactive_ui(
     if now - last_attempt < _SEND_RETRY_INTERVAL:
         return False
 
-    # Send new message
-    thread_kwargs: dict[str, int] = {}
-    if thread_id is not None:
-        thread_kwargs["message_thread_id"] = thread_id
-
     logger.info(
         "Sending interactive UI to user %d for window_id %s", user_id, window_id
     )
     _send_cooldowns[ikey] = now
     # Send as plain text — terminal content should not be formatted.
-    sent: Message | None = None
-    await rate_limit_send(chat_id)
-    try:
-        sent = await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=keyboard,
-            **thread_kwargs,  # type: ignore[arg-type]
-        )
-    except TelegramError as e:
-        logger.error("Failed to send interactive UI to %s: %s", chat_id, e)
+    sent, new_thread_id = await send_plain_bound_message(
+        bot,
+        user_id=user_id,
+        window_id=window_id,
+        thread_id=thread_id,
+        text=text,
+        reply_markup=keyboard,
+    )
     if sent:
-        _interactive_msgs[ikey] = sent.message_id
-        _interactive_mode[ikey] = window_id
+        active_thread_id = new_thread_id if new_thread_id is not None else thread_id
+        active_key = (user_id, active_thread_id or 0)
+        _interactive_msgs[active_key] = sent.message_id
+        _interactive_mode[active_key] = window_id
+        if active_key != ikey:
+            _interactive_msgs.pop(ikey, None)
+            _interactive_mode.pop(ikey, None)
+            _send_cooldowns.pop(ikey, None)
         _send_cooldowns.pop(ikey, None)
     return sent is not None
 
