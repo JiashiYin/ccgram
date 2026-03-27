@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from telegram.error import BadRequest, TelegramError
 
-from conftest import make_mock_provider
+from tests.ccgram.conftest import make_mock_provider
 
 from ccgram.handlers.topic_emoji import (
     DEBOUNCE_TERMINAL_SECONDS,

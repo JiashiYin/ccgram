@@ -9,7 +9,7 @@ import pytest
 from telegram import Bot
 from telegram.error import BadRequest, TelegramError
 
-from conftest import make_mock_provider
+from tests.ccgram.conftest import make_mock_provider
 
 from ccgram.handlers.status_polling import (
     _check_autoclose_timers,
