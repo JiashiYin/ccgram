@@ -654,6 +654,45 @@ def _parse_with_pyte(
     return None
 
 
+async def _parse_window_status(
+    window_id: str,
+    window: TmuxWindow,
+    pane_text: str,
+) -> StatusUpdate | None:
+    """Parse terminal status with pyte, rendered-text, then plain-pane fallback.
+
+    The provider regex parsers work best on clean text. Most of the time the
+    pyte-rendered text is sufficient, but some prompts only survive reliably in
+    tmux's plain capture. In that case, retry the provider parse once against a
+    fresh plain-pane capture before giving up.
+    """
+    status = _parse_with_pyte(
+        window_id,
+        pane_text,
+        columns=window.pane_width,
+        rows=window.pane_height,
+    )
+    if status is not None:
+        return status
+
+    ws = _get_window_state(window_id)
+    provider = get_provider_for_window(window_id)
+    pane_title = ""
+    if provider.capabilities.uses_pane_title:
+        pane_title = await tmux_manager.get_pane_title(window.window_id)
+
+    clean_text = ws.last_rendered_text if ws.last_rendered_text is not None else pane_text
+    status = provider.parse_terminal_status(clean_text, pane_title=pane_title)
+    if status is not None:
+        return status
+
+    plain_text = await tmux_manager.capture_pane(window.window_id)
+    if not plain_text or plain_text in (clean_text, pane_text):
+        return None
+
+    return provider.parse_terminal_status(plain_text, pane_title=pane_title)
+
+
 # ── Multi-pane scanning (agent teams) ─────────────────────────────────
 # When a window has >1 pane (e.g. Claude Code agent teams in split-pane
 # mode), non-active panes are scanned for interactive prompts and alerts
@@ -777,21 +816,7 @@ async def _check_interactive_only(
     if not pane_text:
         return
 
-    status = _parse_with_pyte(
-        window_id, pane_text, columns=w.pane_width, rows=w.pane_height
-    )
-
-    if status is None:
-        # pyte returned nothing — fall back to provider regex parsing
-        ws = _get_window_state(window_id)
-        clean_text = (
-            ws.last_rendered_text if ws.last_rendered_text is not None else pane_text
-        )
-        provider = get_provider_for_window(window_id)
-        pane_title = ""
-        if provider.capabilities.uses_pane_title:
-            pane_title = await tmux_manager.get_pane_title(w.window_id)
-        status = provider.parse_terminal_status(clean_text, pane_title=pane_title)
+    status = await _parse_window_status(window_id, w, pane_text)
 
     if status is not None and status.is_interactive:
         # Pre-set interactive mode to prevent racing with _handle_notification
@@ -833,10 +858,8 @@ async def update_status_message(
     interactive_window = get_interactive_window(user_id, thread_id)
     should_check_new_ui = True
 
-    # Parse terminal status: try pyte-based parsing first, fall back to regex
-    status = _parse_with_pyte(
-        window_id, pane_text, columns=w.pane_width, rows=w.pane_height
-    )
+    # Parse terminal status using ANSI-aware pyte first, then provider fallbacks.
+    status = await _parse_window_status(window_id, w, pane_text)
 
     # Passive vim INSERT mode tracking — feed the polling cache so that
     # _ensure_vim_insert_mode() has a warm cache for the common case.
@@ -847,19 +870,6 @@ async def update_status_message(
     vim_text = ws.last_rendered_text if ws.last_rendered_text is not None else pane_text
     if _has_insert_indicator(vim_text):
         notify_vim_insert_seen(w.window_id)
-
-    if status is None:
-        # pyte path returned nothing — fall back to provider regex parsing.
-        # Use pyte-rendered clean text (ANSI-stripped) so regex parsers
-        # don't choke on escape sequences.
-        clean_text = (
-            ws.last_rendered_text if ws.last_rendered_text is not None else pane_text
-        )
-        provider = get_provider_for_window(window_id)
-        pane_title = ""
-        if provider.capabilities.uses_pane_title:
-            pane_title = await tmux_manager.get_pane_title(w.window_id)
-        status = provider.parse_terminal_status(clean_text, pane_title=pane_title)
 
     if interactive_window == window_id:
         # User is in interactive mode for THIS window

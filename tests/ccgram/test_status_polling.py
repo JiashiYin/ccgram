@@ -687,6 +687,40 @@ class TestPyteFallbackInUpdateStatus:
         mocks["interactive"].assert_called_once_with(ANY, 1, "@0", 42)
         mocks["enqueue"].assert_not_called()
 
+    async def test_interactive_ui_falls_back_to_plain_capture(self) -> None:
+        from ccgram.providers.base import StatusUpdate
+
+        interactive_status = StatusUpdate(
+            raw_text="Would you like to proceed?",
+            display_label="Permission prompt",
+            is_interactive=True,
+            ui_type="PermissionPrompt",
+        )
+        mock_provider = MagicMock()
+        mock_provider.capabilities.uses_pane_title = False
+        mock_provider.parse_terminal_status.side_effect = [None, interactive_status]
+        stack, mocks = _mock_update_status_patches(
+            pyte_result=None, provider=mock_provider
+        )
+        with stack:
+            from ccgram.handlers.status_polling import update_status_message
+
+            _get_window_state("@0").last_rendered_text = ""
+            mocks["tm"].capture_pane = AsyncMock(
+                side_effect=[
+                    "\x1b[1mWould you like to proceed?\x1b[0m",
+                    "Would you like to proceed?\n1. Yes\n2. No\n",
+                ]
+            )
+            await update_status_message(AsyncMock(spec=Bot), 1, "@0", thread_id=42)
+
+        assert mock_provider.parse_terminal_status.call_args_list == [
+            (( "",), {"pane_title": ""}),
+            (("Would you like to proceed?\n1. Yes\n2. No\n",), {"pane_title": ""}),
+        ]
+        mocks["interactive"].assert_called_once_with(ANY, 1, "@0", 42)
+        mocks["enqueue"].assert_not_called()
+
 
 class TestClearSeenStatus:
     def test_clears_seen_status_and_startup(self) -> None:
@@ -2381,3 +2415,55 @@ class TestCheckInteractiveOnly:
         mock_handle.assert_called_once_with(bot, 1, "@0", 42)
         if uses_pane_title:
             mock_tm.get_pane_title.assert_called_once_with("@0")
+
+    async def test_falls_back_to_plain_capture_when_rendered_text_misses(self) -> None:
+        from ccgram.handlers.status_polling import _check_interactive_only
+        from ccgram.providers.base import StatusUpdate
+
+        interactive_status = StatusUpdate(
+            raw_text="Allow?",
+            display_label="Allow?",
+            is_interactive=True,
+            ui_type="PermissionPrompt",
+        )
+        mock_provider = MagicMock()
+        mock_provider.capabilities.uses_pane_title = False
+        mock_provider.parse_terminal_status.side_effect = [None, interactive_status]
+        mock_window = MagicMock()
+        mock_window.window_id = "@0"
+        mock_window.pane_width = 80
+        mock_window.pane_height = 24
+        bot = AsyncMock(spec=Bot)
+        with (
+            patch("ccgram.handlers.status_polling.tmux_manager") as mock_tm,
+            patch(
+                "ccgram.handlers.status_polling.get_interactive_window",
+                return_value=None,
+            ),
+            patch(
+                "ccgram.handlers.status_polling._parse_with_pyte",
+                return_value=None,
+            ),
+            patch(
+                "ccgram.handlers.status_polling.get_provider_for_window",
+                return_value=mock_provider,
+            ),
+            patch(
+                "ccgram.handlers.status_polling.handle_interactive_ui",
+                new_callable=AsyncMock,
+            ) as mock_handle,
+            patch("ccgram.handlers.status_polling.set_interactive_mode"),
+        ):
+            _get_window_state("@0").last_rendered_text = ""
+            mock_tm.capture_pane = AsyncMock(
+                side_effect=[
+                    "\x1b[1mAllow?\x1b[0m",
+                    "Allow?\n1. Yes\n2. No\n",
+                ]
+            )
+            await _check_interactive_only(bot, 1, "@0", 42, _window=mock_window)
+        assert mock_provider.parse_terminal_status.call_args_list == [
+            (("",), {"pane_title": ""}),
+            (("Allow?\n1. Yes\n2. No\n",), {"pane_title": ""}),
+        ]
+        mock_handle.assert_called_once_with(bot, 1, "@0", 42)
