@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from ccgram.providers import _ensure_registered, _reset_provider
 from ccgram.session import SessionManager
 
 pytestmark = pytest.mark.integration
@@ -26,6 +27,8 @@ def make_session_manager(tmp_path, monkeypatch):
         monkeypatch.setattr(
             "ccgram.config.config.session_map_file", tmp_path / "session_map.json"
         )
+        _reset_provider()
+        _ensure_registered()
         return SessionManager()
 
     return _make
@@ -112,16 +115,48 @@ async def test_window_state_survives_reload(make_session_manager) -> None:
     state = sm1.get_window_state("@5")
     state.session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     state.cwd = "/tmp/myproject"
-    sm1.set_window_provider("@5", "claude")
-    sm1.set_notification_mode("@5", "errors_only")
+    sm1.set_notification_mode("@5", "notify")
     sm1.flush_state()
 
     sm2 = make_session_manager()
     reloaded = sm2.get_window_state("@5")
     assert reloaded.session_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     assert reloaded.cwd == "/tmp/myproject"
-    assert reloaded.provider_name == "claude"
-    assert reloaded.notification_mode == "errors_only"
+    assert reloaded.notification_mode == "notify"
+
+
+async def test_legacy_notification_modes_normalize_on_reload(
+    make_session_manager, tmp_path, monkeypatch
+) -> None:
+    state = {
+        "window_states": {
+            "@9": {
+                "session_id": "s1",
+                "cwd": "/tmp",
+                "notification_mode": "all",
+            },
+            "@10": {
+                "session_id": "s2",
+                "cwd": "/tmp",
+                "notification_mode": "passive",
+            },
+        },
+        "user_window_offsets": {},
+        "thread_bindings": {},
+        "group_chat_ids": {},
+        "window_display_names": {},
+        "user_dir_favorites": {},
+    }
+    state_file = tmp_path / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr("ccgram.config.config.state_file", state_file)
+    monkeypatch.setattr(
+        "ccgram.config.config.session_map_file", tmp_path / "session_map.json"
+    )
+
+    sm = SessionManager()
+    assert sm.get_window_state("@9").notification_mode == "interactive"
+    assert sm.get_window_state("@10").notification_mode == "notify"
 
 
 async def test_duplicate_bindings_deduped_on_load(tmp_path, monkeypatch) -> None:

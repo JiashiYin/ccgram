@@ -51,6 +51,26 @@ DEFAULT_BATCH_MODE = "batched"
 
 
 _LEGACY_SESSION_PREFIX = "ccbot:"
+_LEGACY_NOTIFICATION_MODE_MAP = {
+    "": "interactive",
+    "all": "interactive",
+    "normal": "interactive",
+    "passive": "notify",
+}
+
+
+def _normalize_notification_mode(mode: str) -> str:
+    """Normalize legacy notification mode names to the canonical vocabulary."""
+    if mode in NOTIFICATION_MODES:
+        return mode
+    legacy = _LEGACY_NOTIFICATION_MODE_MAP.get(mode)
+    if legacy is not None:
+        return legacy
+    return "interactive"
+
+
+def _is_valid_notification_mode(mode: str) -> bool:
+    return mode in NOTIFICATION_MODES or mode in _LEGACY_NOTIFICATION_MODE_MAP
 
 
 def parse_session_map(raw: dict[str, Any], prefix: str) -> dict[str, dict[str, str]]:
@@ -104,7 +124,7 @@ class WindowState:
         cwd: Working directory for direct file path construction
         window_name: Display name of the window
         transcript_path: Direct path to JSONL transcript file (from hook payload)
-        notification_mode: "all" | "errors_only" | "muted"
+        notification_mode: "interactive" | "notify" | "errors_only" | "muted"
         approval_mode: "normal" | "yolo"
         external: True for windows owned by external tools (emdash) — never killed by ccgram
     """
@@ -113,7 +133,7 @@ class WindowState:
     cwd: str = ""
     window_name: str = ""
     transcript_path: str = ""
-    notification_mode: str = "all"
+    notification_mode: str = "interactive"
     provider_name: str = ""
     approval_mode: str = DEFAULT_APPROVAL_MODE
     batch_mode: str = DEFAULT_BATCH_MODE
@@ -128,8 +148,9 @@ class WindowState:
             d["window_name"] = self.window_name
         if self.transcript_path:
             d["transcript_path"] = self.transcript_path
-        if self.notification_mode != "all":
-            d["notification_mode"] = self.notification_mode
+        notification_mode = _normalize_notification_mode(self.notification_mode)
+        if notification_mode != "interactive":
+            d["notification_mode"] = notification_mode
         if self.provider_name:
             d["provider_name"] = self.provider_name
         if self.approval_mode != DEFAULT_APPROVAL_MODE:
@@ -147,7 +168,9 @@ class WindowState:
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
             transcript_path=data.get("transcript_path", ""),
-            notification_mode=data.get("notification_mode", "all"),
+            notification_mode=_normalize_notification_mode(
+                data.get("notification_mode", "interactive")
+            ),
             provider_name=data.get("provider_name", ""),
             approval_mode=data.get("approval_mode", DEFAULT_APPROVAL_MODE),
             batch_mode=data.get("batch_mode", DEFAULT_BATCH_MODE),
@@ -989,7 +1012,7 @@ class SessionManager:
         """Clear session association for a window (e.g., after /clear command)."""
         state = self.get_window_state(window_id)
         state.session_id = ""
-        state.notification_mode = "all"
+        state.notification_mode = "interactive"
         self._save_state()
         logger.info("Cleared session for window_id %s", window_id)
 
@@ -1086,21 +1109,26 @@ class SessionManager:
     _NOTIFICATION_MODES = NOTIFICATION_MODES
 
     def get_notification_mode(self, window_id: str) -> str:
-        """Get notification mode for a window (default: 'all')."""
+        """Get notification mode for a window (default: 'interactive')."""
         state = self.window_states.get(window_id)
-        return state.notification_mode if state else "all"
+        return (
+            _normalize_notification_mode(state.notification_mode)
+            if state
+            else "interactive"
+        )
 
     def set_notification_mode(self, window_id: str, mode: str) -> None:
         """Set notification mode for a window."""
-        if mode not in self._NOTIFICATION_MODES:
+        if not _is_valid_notification_mode(mode):
             raise ValueError(f"Invalid notification mode: {mode!r}")
+        normalized = _normalize_notification_mode(mode)
         state = self.get_window_state(window_id)
-        if state.notification_mode != mode:
-            state.notification_mode = mode
+        if state.notification_mode != normalized:
+            state.notification_mode = normalized
             self._save_state()
 
     def cycle_notification_mode(self, window_id: str) -> str:
-        """Cycle notification mode: all → errors_only → muted → all. Returns new mode."""
+        """Cycle notification mode: interactive → notify → errors_only → muted → interactive."""
         current = self.get_notification_mode(window_id)
         modes = self._NOTIFICATION_MODES
         idx = modes.index(current) if current in modes else 0

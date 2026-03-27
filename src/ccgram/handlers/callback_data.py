@@ -74,9 +74,15 @@ CB_RESUME_PAGE = "res:pg:"  # res:pg:<page> (pagination)
 CB_RESUME_CANCEL = "res:x"  # cancel resume browser
 
 # Notification mode metadata (single source of truth)
-NOTIFICATION_MODES: tuple[str, ...] = ("all", "errors_only", "muted")
+NOTIFICATION_MODES: tuple[str, ...] = (
+    "interactive",
+    "notify",
+    "errors_only",
+    "muted",
+)
 NOTIFY_MODE_ICONS: dict[str, str] = {
-    "all": "\U0001f514",
+    "interactive": "\U0001f514",
+    "notify": "\U0001f4e2",
     "errors_only": "\u26a0\ufe0f",
     "muted": "\U0001f515",
 }

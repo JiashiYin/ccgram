@@ -21,14 +21,14 @@ def mgr(monkeypatch) -> SessionManager:
 
 class TestNotificationMode:
     def test_get_default_mode(self, mgr: SessionManager) -> None:
-        assert mgr.get_notification_mode("@0") == "all"
+        assert mgr.get_notification_mode("@0") == "interactive"
 
     def test_get_mode_nonexistent_window(self, mgr: SessionManager) -> None:
-        assert mgr.get_notification_mode("@999") == "all"
+        assert mgr.get_notification_mode("@999") == "interactive"
 
     def test_set_mode(self, mgr: SessionManager) -> None:
-        mgr.set_notification_mode("@0", "muted")
-        assert mgr.get_notification_mode("@0") == "muted"
+        mgr.set_notification_mode("@0", "notify")
+        assert mgr.get_notification_mode("@0") == "notify"
 
     def test_set_mode_validates(self, mgr: SessionManager) -> None:
         with pytest.raises(ValueError, match="Invalid notification mode"):
@@ -36,7 +36,12 @@ class TestNotificationMode:
 
     @pytest.mark.parametrize(
         ("start", "expected"),
-        [("all", "errors_only"), ("errors_only", "muted"), ("muted", "all")],
+        [
+            ("interactive", "notify"),
+            ("notify", "errors_only"),
+            ("errors_only", "muted"),
+            ("muted", "interactive"),
+        ],
     )
     def test_cycle(self, mgr: SessionManager, start: str, expected: str) -> None:
         mgr.set_notification_mode("@0", start)
@@ -45,22 +50,24 @@ class TestNotificationMode:
 
     def test_cycle_full_circle(self, mgr: SessionManager) -> None:
         mgr.cycle_notification_mode("@1")
+        assert mgr.get_notification_mode("@1") == "notify"
+        mgr.cycle_notification_mode("@1")
         assert mgr.get_notification_mode("@1") == "errors_only"
         mgr.cycle_notification_mode("@1")
         assert mgr.get_notification_mode("@1") == "muted"
         mgr.cycle_notification_mode("@1")
-        assert mgr.get_notification_mode("@1") == "all"
+        assert mgr.get_notification_mode("@1") == "interactive"
 
     def test_clear_window_resets_notification_mode(self, mgr: SessionManager) -> None:
-        mgr.set_notification_mode("@0", "muted")
+        mgr.set_notification_mode("@0", "notify")
         mgr.clear_window_session("@0")
-        assert mgr.get_notification_mode("@0") == "all"
+        assert mgr.get_notification_mode("@0") == "interactive"
 
 
 class TestWindowStateSerialization:
     @pytest.mark.parametrize(
         ("mode", "expect_key"),
-        [("all", False), ("errors_only", True), ("muted", True)],
+        [("interactive", False), ("notify", True), ("errors_only", True), ("muted", True)],
     )
     def test_to_dict_notification_mode(self, mode: str, expect_key: bool) -> None:
         ws = WindowState(session_id="s1", cwd="/tmp", notification_mode=mode)
@@ -73,7 +80,19 @@ class TestWindowStateSerialization:
     @pytest.mark.parametrize(
         ("data", "expected"),
         [
-            ({"session_id": "s1", "cwd": "/tmp"}, "all"),
+            ({"session_id": "s1", "cwd": "/tmp"}, "interactive"),
+            (
+                {"session_id": "s1", "cwd": "/tmp", "notification_mode": "all"},
+                "interactive",
+            ),
+            (
+                {"session_id": "s1", "cwd": "/tmp", "notification_mode": "passive"},
+                "notify",
+            ),
+            (
+                {"session_id": "s1", "cwd": "/tmp", "notification_mode": "notify"},
+                "notify",
+            ),
             (
                 {"session_id": "s1", "cwd": "/tmp", "notification_mode": "errors_only"},
                 "errors_only",
@@ -87,6 +106,10 @@ class TestWindowStateSerialization:
     def test_roundtrip(self, mode: str) -> None:
         ws = WindowState(session_id="s1", cwd="/tmp", notification_mode=mode)
         assert WindowState.from_dict(ws.to_dict()).notification_mode == mode
+
+    def test_roundtrip_normalizes_legacy_modes(self) -> None:
+        ws = WindowState(session_id="s1", cwd="/tmp", notification_mode="all")
+        assert WindowState.from_dict(ws.to_dict()).notification_mode == "interactive"
 
 
 class TestNotificationModeConstants:
