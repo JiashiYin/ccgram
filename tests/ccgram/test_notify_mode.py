@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from ccgram.bot import handle_new_message
+from ccgram.bot import _extract_notify_summary, handle_new_message
 from ccgram.handlers.directory_callbacks import _create_window_and_bind
 from ccgram.handlers.directory_browser import UNBOUND_WINDOWS_KEY
 from ccgram.handlers.recovery_callbacks import _create_and_bind_window
@@ -12,8 +12,6 @@ from ccgram.handlers.window_callbacks import _handle_bind
 from ccgram.handlers.user_state import PENDING_THREAD_ID, RECOVERY_WINDOW_ID
 from ccgram.session_monitor import NewMessage
 from ccgram.session import WindowState
-
-
 def _make_query(thread_id: int = 42) -> MagicMock:
     query = MagicMock()
     query.answer = AsyncMock()
@@ -184,13 +182,41 @@ class TestTelegramCreatedFlowsStayInteractive:
 
 
 class TestNotifyModeMessageRouting:
+    def test_extract_notify_summary_strips_milestone_marker(self) -> None:
+        is_summary, filtered = _extract_notify_summary(
+            "[CCGRAM_MILESTONE] shell integration installed"
+        )
+
+        assert is_summary is True
+        assert filtered == "shell integration installed"
+
+    def test_extract_notify_summary_strips_final_marker(self) -> None:
+        is_summary, filtered = _extract_notify_summary(
+            "[CCGRAM_FINAL] finished sync and tests passed"
+        )
+
+        assert is_summary is True
+        assert filtered == "finished sync and tests passed"
+
+    def test_extract_notify_summary_leaves_plain_text_unchanged(self) -> None:
+        is_summary, filtered = _extract_notify_summary("plain progress update")
+
+        assert is_summary is False
+        assert filtered == "plain progress update"
+
     async def test_notify_mode_filters_routine_assistant_output(self) -> None:
-        msg = NewMessage(session_id="sess-1", text="Working through the task", is_complete=True)
+        msg = NewMessage(
+            session_id="sess-1",
+            text="Working through the task",
+            is_complete=True,
+        )
         bot = AsyncMock()
 
         with (
             patch("ccgram.bot.session_manager") as mock_sm,
-            patch("ccgram.bot.enqueue_content_message", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_enqueue,
             patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
             patch("ccgram.bot.get_interactive_msg_id", return_value=None),
         ):
@@ -202,13 +228,17 @@ class TestNotifyModeMessageRouting:
         mock_enqueue.assert_not_called()
         mock_clear.assert_not_called()
 
-    async def test_notify_mode_clears_stale_interactive_ui_before_suppressing(self) -> None:
+    async def test_notify_mode_clears_stale_interactive_ui_before_suppressing(
+        self,
+    ) -> None:
         msg = NewMessage(session_id="sess-1", text="Done", is_complete=True)
         bot = AsyncMock()
 
         with (
             patch("ccgram.bot.session_manager") as mock_sm,
-            patch("ccgram.bot.enqueue_content_message", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_enqueue,
             patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
             patch("ccgram.bot.get_interactive_msg_id", return_value=99),
         ):
@@ -235,10 +265,16 @@ class TestNotifyModeMessageRouting:
             patch("ccgram.bot.session_manager") as mock_sm,
             patch("ccgram.bot.get_message_queue", return_value=queue),
             patch("ccgram.bot.set_interactive_mode"),
-            patch("ccgram.bot.handle_interactive_ui", new_callable=AsyncMock, return_value=True) as mock_handle,
+            patch(
+                "ccgram.bot.handle_interactive_ui",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_handle,
             patch("ccgram.bot.get_interactive_msg_id", return_value=None),
             patch("ccgram.bot.asyncio.sleep", new_callable=AsyncMock),
-            patch("ccgram.bot.enqueue_content_message", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
             mock_sm.get_notification_mode.return_value = "notify"
@@ -249,3 +285,77 @@ class TestNotifyModeMessageRouting:
         queue.join.assert_awaited_once()
         mock_handle.assert_awaited_once_with(bot, 100, "@7", 42)
         mock_enqueue.assert_not_called()
+
+    async def test_notify_mode_allows_explicit_milestone_summary(self) -> None:
+        msg = NewMessage(
+            session_id="sess-1",
+            text="[CCGRAM_MILESTONE] shell integration installed",
+            is_complete=True,
+        )
+        bot = AsyncMock()
+
+        with (
+            patch("ccgram.bot.session_manager") as mock_sm,
+            patch(
+                "ccgram.bot.build_response_parts",
+                return_value=["shell integration installed"],
+            ) as mock_parts,
+            patch(
+                "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_enqueue,
+            patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
+            patch("ccgram.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
+            mock_sm.get_notification_mode.return_value = "notify"
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await handle_new_message(msg, bot)
+
+        mock_parts.assert_called_once_with(
+            "shell integration installed",
+            True,
+            "text",
+            "assistant",
+        )
+        mock_enqueue.assert_awaited_once()
+        assert mock_enqueue.await_args.kwargs["text"] == "shell integration installed"
+        mock_clear.assert_not_called()
+
+    async def test_notify_mode_allows_explicit_final_summary_and_strips_marker(
+        self,
+    ) -> None:
+        msg = NewMessage(
+            session_id="sess-1",
+            text="[CCGRAM_FINAL] finished sync and tests passed",
+            is_complete=True,
+        )
+        bot = AsyncMock()
+
+        with (
+            patch("ccgram.bot.session_manager") as mock_sm,
+            patch(
+                "ccgram.bot.build_response_parts",
+                return_value=["finished sync and tests passed"],
+            ) as mock_parts,
+            patch(
+                "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
+            ) as mock_enqueue,
+            patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
+            patch("ccgram.bot.get_interactive_msg_id", return_value=None),
+        ):
+            mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
+            mock_sm.get_notification_mode.return_value = "notify"
+            mock_sm.resolve_session_for_window = AsyncMock(return_value=None)
+
+            await handle_new_message(msg, bot)
+
+        mock_parts.assert_called_once_with(
+            "finished sync and tests passed",
+            True,
+            "text",
+            "assistant",
+        )
+        mock_enqueue.assert_awaited_once()
+        assert mock_enqueue.await_args.kwargs["text"] == "finished sync and tests passed"
+        mock_clear.assert_not_called()

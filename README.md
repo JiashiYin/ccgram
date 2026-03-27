@@ -86,6 +86,7 @@ Each Telegram Forum topic binds to one tmux window running an agent CLI. Message
 - Assistant responses, thinking content, tool use/result pairs, and command output
 - Live status line showing what the agent is currently doing
 - Entity-based formatting with automatic plain text fallback
+- Notify mode suppresses routine chatter and only delivers explicit milestone/final summaries when the assistant prefixes a message with `[CCGRAM_MILESTONE]` or `[CCGRAM_FINAL]`. The marker is stripped before Telegram delivery.
 
 **Session management**
 
@@ -185,6 +186,17 @@ ccgram
 ```
 
 Open your Telegram group, create a new topic, send a message — a directory browser appears. Pick a project directory, choose your agent (Claude, Codex, Gemini, or Shell), then choose session mode (`✅ Standard` or `🚀 YOLO`), and you're connected.
+
+### Notify-mode summaries
+
+Quiet `notify` topics stay silent unless there is a blocking prompt or the agent emits an explicit summary marker. Use these prefixes in assistant output:
+
+```text
+[CCGRAM_MILESTONE] shell integration installed
+[CCGRAM_FINAL] task complete, tests passed
+```
+
+CCGram strips the marker before forwarding the message to Telegram.
 
 ## Migrating from ccbot
 

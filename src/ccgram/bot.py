@@ -180,6 +180,8 @@ _ERROR_KEYWORDS_RE = re.compile(
     r"\b(?:error|exception|failed|traceback|stderr|assertion)\b", re.IGNORECASE
 )
 
+_NOTIFY_SUMMARY_MARKERS = ("[CCGRAM_MILESTONE]", "[CCGRAM_FINAL]")
+
 # Max label length for /recall command buttons (wider than status bar buttons)
 _RECALL_LABEL_MAX = 40
 _CODEX_STATUS_FALLBACK_DELAY_SECONDS = 1.2
@@ -264,6 +266,14 @@ def _short_supported_commands(supported_commands: set[str], limit: int = 8) -> s
     shown = supported[:limit]
     suffix = "" if len(supported) <= limit else " …"
     return "Try: " + ", ".join(shown) + suffix
+
+
+def _extract_notify_summary(text: str) -> tuple[bool, str]:
+    """Return stripped text when a notify summary marker is present."""
+    for marker in _NOTIFY_SUMMARY_MARKERS:
+        if text.startswith(marker):
+            return True, text[len(marker) :].strip()
+    return False, text
 
 
 def _set_bounded_cache_entry[K, V](
@@ -1429,6 +1439,10 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             "tool_use",
             "tool_result",
         )
+        is_notify_summary = False
+        summary_text = msg.text
+        if msg.role == "assistant" and msg.text:
+            is_notify_summary, summary_text = _extract_notify_summary(msg.text)
         if not is_interactive_tool and get_interactive_msg_id(user_id, thread_id):
             await clear_interactive_msg(user_id, bot, thread_id)
         if notif_mode == "muted":
@@ -1437,7 +1451,11 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
         elif notif_mode == "errors_only":
             if not is_tool_flow and not _ERROR_KEYWORDS_RE.search(msg.text or ""):
                 continue
-        elif notif_mode == "notify" and not is_interactive_tool:
+        elif (
+            notif_mode == "notify"
+            and not is_interactive_tool
+            and not (is_notify_summary and summary_text)
+        ):
             continue
 
         # Handle interactive tools specially - capture terminal and send UI
@@ -1468,7 +1486,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 clear_interactive_mode(user_id, thread_id)
 
         parts = build_response_parts(
-            msg.text,
+            summary_text,
             msg.is_complete,
             msg.content_type,
             msg.role,
@@ -1485,7 +1503,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 parts=parts,
                 tool_use_id=msg.tool_use_id,
                 content_type=msg.content_type,
-                text=msg.text,
+                text=summary_text,
                 thread_id=thread_id,
             )
 
