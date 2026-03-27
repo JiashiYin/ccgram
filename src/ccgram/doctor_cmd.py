@@ -17,6 +17,7 @@ from pathlib import Path
 
 from collections.abc import Callable
 
+from .notify_shell import get_notify_status
 from .providers import resolve_capabilities
 from .utils import ccgram_dir, tmux_session_name
 
@@ -62,6 +63,23 @@ def _check_provider_command(provider_name: str) -> tuple[str, str]:
         label = cmd if cmd != executable else executable
         return _PASS, f"{label} found at {path}"
     return _FAIL, f"'{executable}' not found in PATH"
+
+
+def _check_notify_shell(provider_name: str) -> tuple[str, str]:
+    """Check notify shell integration status for a provider."""
+    status = get_notify_status(provider_name)
+    if not status["configured"]:
+        return _WARN, f"notify shell not configured for {provider_name}"
+    if not status["snippet_exists"]:
+        return _FAIL, f"notify shell snippet missing for {provider_name}"
+    if not status["direct_launcher_exists"]:
+        return _FAIL, f"notify direct launcher missing for {provider_name}"
+    if not status["env_matches_direct_launcher"]:
+        return _FAIL, f"notify env override mismatch for {provider_name}"
+    if status["enabled"] and not status["rc_hook_present"]:
+        return _FAIL, f"notify shell hook missing from {status['rc_path']}"
+    state = "enabled" if status["enabled"] else "disabled"
+    return _PASS, f"notify shell {state} for {provider_name}"
 
 
 def _check_tmux_session() -> tuple[str, str]:
@@ -299,6 +317,9 @@ def doctor_main(fix: bool = False) -> None:
     has_failures = has_failures or failed
 
     _, _, failed = _run_check(lambda: _check_provider_command(caps.name))
+    has_failures = has_failures or failed
+
+    _, _, failed = _run_check(lambda: _check_notify_shell(caps.name))
     has_failures = has_failures or failed
 
     _, _, failed = _run_check(_check_tmux_session)

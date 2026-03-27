@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .notify_shell import get_notify_status
 from .utils import ccgram_dir, tmux_session_name
 
 _TMUX_FORMAT_PARTS = 2
@@ -101,6 +102,15 @@ def status_main() -> None:
     # Output
     print(f"ccgram {__version__}")
     print(f"Provider: {provider_name} ({cap_flags})")
+    notify_status = get_notify_status("codex")
+    if notify_status["configured"]:
+        state = "enabled" if notify_status["enabled"] else "disabled"
+        print(
+            f"Notify shell: codex {state} "
+            f"({notify_status['shell']}, {notify_status['mode']})"
+        )
+    else:
+        print("Notify shell: not configured")
     print(f"Tmux session: {session_name} ({len(live_windows)} windows)")
     print(f"Monitored sessions: {monitored}")
 

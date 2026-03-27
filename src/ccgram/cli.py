@@ -11,6 +11,8 @@ from pathlib import Path
 
 import click
 
+from .notify_cmd import notify_group
+
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 
 
@@ -241,3 +243,6 @@ def doctor_cmd(fix: bool) -> None:
     from .doctor_cmd import doctor_main
 
     doctor_main(fix=fix)
+
+
+cli.add_command(notify_group)

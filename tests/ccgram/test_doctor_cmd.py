@@ -229,6 +229,33 @@ class TestDoctorMain:
         assert "Provider: codex" in captured.out
         assert "hook check skipped" in captured.out
 
+    def test_reports_notify_shell_health(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("CCGRAM_PROVIDER", "codex")
+        monkeypatch.setenv("TMUX_SESSION_NAME", "test")
+        monkeypatch.setenv("ALLOWED_USERS", "123")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+
+        monkeypatch.setattr(
+            "ccgram.doctor_cmd.shutil.which",
+            lambda _cmd: f"/usr/bin/{_cmd}",
+        )
+        monkeypatch.setattr(
+            "ccgram.doctor_cmd._check_tmux_session",
+            lambda: ("pass", "ok"),
+        )
+        monkeypatch.setattr("ccgram.doctor_cmd._find_orphaned_windows", lambda: [])
+        monkeypatch.setattr(
+            "ccgram.doctor_cmd._check_notify_shell",
+            lambda provider_name: ("pass", f"notify shell enabled for {provider_name}"),
+        )
+
+        with pytest.raises(SystemExit):
+            doctor_main()
+
+        captured = capsys.readouterr()
+        assert "notify shell enabled for codex" in captured.out
+
 
 class TestCheckProviderCommand:
     def test_found(self, monkeypatch) -> None:

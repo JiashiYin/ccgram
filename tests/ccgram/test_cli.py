@@ -39,6 +39,7 @@ class TestCliCommands:
         assert "Commands:" in result.output
         assert "run" in result.output
         assert "hook" in result.output
+        assert "notify" in result.output
         assert "status" in result.output
         assert "doctor" in result.output
 
@@ -63,6 +64,14 @@ class TestCliCommands:
     def test_status_help(self, runner):
         result = runner.invoke(cli, ["status", "--help"])
         assert result.exit_code == 0
+
+    def test_notify_help(self, runner):
+        result = runner.invoke(cli, ["notify", "--help"])
+        assert result.exit_code == 0
+        assert "install" in result.output
+        assert "status" in result.output
+        assert "disable" in result.output
+        assert "uninstall" in result.output
 
 
 class TestRunValidation:
