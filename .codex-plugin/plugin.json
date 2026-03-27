@@ -1,0 +1,39 @@
+{
+  "name": "ccgram-notify",
+  "version": "0.1.0",
+  "description": "Telegram notify and remote-control workflow for agent CLIs, with Codex-first setup.",
+  "author": {
+    "name": "CCGram Notify Contributors",
+    "url": "https://github.com/alexei-led/ccgram"
+  },
+  "homepage": "https://github.com/alexei-led/ccgram",
+  "repository": "https://github.com/alexei-led/ccgram",
+  "license": "MIT",
+  "keywords": [
+    "telegram",
+    "tmux",
+    "codex",
+    "notify",
+    "agents"
+  ],
+  "interface": {
+    "displayName": "CCGram Notify",
+    "shortDescription": "Telegram notify and control for agent CLIs.",
+    "longDescription": "Adds interactive and notify session modes to CCGram, plus a Codex-first setup flow that routes normal codex launches into the monitored tmux workflow.",
+    "developerName": "CCGram Notify Contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/alexei-led/ccgram",
+    "privacyPolicyURL": "https://github.com/alexei-led/ccgram/blob/main/README.md",
+    "termsOfServiceURL": "https://github.com/alexei-led/ccgram/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Install CCGram Notify for Codex on this machine.",
+      "Check whether notify mode is enabled and healthy.",
+      "Explain how interactive and notify sessions differ."
+    ],
+    "brandColor": "#0088CC"
+  }
+}

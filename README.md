@@ -1,4 +1,4 @@
-# CCGram — Command & Control Bot
+# CCGram Notify
 
 [![CI](https://github.com/alexei-led/ccgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alexei-led/ccgram/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ccgram)](https://pypi.org/project/ccgram/)
@@ -8,7 +8,9 @@
 [![License](https://img.shields.io/github/license/alexei-led/ccgram)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Control AI coding agents from your phone. CCGram bridges Telegram to tmux — monitor output, respond to prompts, and manage sessions without touching your computer. Supports [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), and plain shell sessions with LLM command generation.
+Control AI coding agents from your phone. CCGram bridges Telegram to tmux so you can monitor output, respond to prompts, and manage sessions without touching your computer. This fork packages that bridge as **CCGram Notify**: a Codex-first install flow that makes normal `codex` launches enter the monitored workflow in quiet `notify` mode, while Telegram-opened sessions stay fully `interactive`.
+
+CCGram Notify still supports [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), and plain shell sessions with LLM command generation.
 
 ## Why CCGram?
 
@@ -88,6 +90,11 @@ Each Telegram Forum topic binds to one tmux window running an agent CLI. Message
 - Entity-based formatting with automatic plain text fallback
 - Notify mode suppresses routine chatter and only delivers explicit milestone/final summaries when the assistant prefixes a message with `[CCGRAM_MILESTONE]` or `[CCGRAM_FINAL]`. The marker is stripped before Telegram delivery.
 
+## Modes
+
+- `interactive`: full Telegram mirror for sessions intentionally opened or rebound from Telegram
+- `notify`: quiet monitoring for unattended or normally launched sessions; only blocking prompts, failure/dead notices, and explicit milestone/final summaries break through
+
 **Session management**
 
 - Directory browser for creating new sessions from Telegram
@@ -131,13 +138,19 @@ Each Telegram Forum topic binds to one tmux window running an agent CLI. Message
 ### Install
 
 ```bash
-# Recommended
-uv tool install ccgram
-
-# Alternatives
-pipx install ccgram                   # pipx
-brew install alexei-led/tap/ccgram    # Homebrew (macOS)
+# GitHub checkout
+git clone https://github.com/alexei-led/ccgram.git
+cd ccgram
+uv tool install --editable .
 ```
+
+On a fresh machine, the first `uv tool install --editable .` may download build/runtime dependencies such as `hatchling`, `hatch-vcs`, and wheels that are not already cached.
+
+The repo also ships plugin-style metadata in:
+
+- `.codex-plugin/plugin.json`
+- `.claude-plugin/plugin.json`
+- `.claude-plugin/marketplace.json`
 
 ### Configure
 
@@ -158,6 +171,16 @@ CCGRAM_GROUP_ID=your_telegram_group_id
 
 > Get your user ID from [@userinfobot](https://t.me/userinfobot) on Telegram.
 > Get the group ID by adding -100 in front of the **Peer ID** found in the Group Info (or use [@RawDataBot](https://t.me/RawDataBot)).
+
+6. Install notify shell integration for normal Codex launches:
+
+```bash
+ccgram notify install --provider codex --shell bash
+ccgram notify status
+ccgram doctor
+```
+
+After this one-time step, typing plain `codex` routes into the monitored tmux workflow and defaults to `notify`.
 
 ### Install hooks (Claude Code only)
 
@@ -187,6 +210,38 @@ ccgram
 
 Open your Telegram group, create a new topic, send a message — a directory browser appears. Pick a project directory, choose your agent (Claude, Codex, Gemini, or Shell), then choose session mode (`✅ Standard` or `🚀 YOLO`), and you're connected.
 
+### Everyday Notify Workflow
+
+After `ccgram notify install`, normal `codex` launches default to `notify`:
+
+```bash
+codex
+```
+
+That launch enters the monitored tmux workflow, can proactively message you in Telegram when it blocks, and still supports phone-side approvals through the existing interactive UI bridge.
+
+Telegram-created sessions stay `interactive`, so the user-opened topic remains fully chatty like a remote terminal.
+
+### Notify Management
+
+Check current shell integration:
+
+```bash
+ccgram notify status
+```
+
+Temporarily stop intercepting plain `codex` without removing the rest of the setup:
+
+```bash
+ccgram notify disable
+```
+
+Remove the shell hook and direct-launch override completely:
+
+```bash
+ccgram notify uninstall
+```
+
 ### Notify-mode summaries
 
 Quiet `notify` topics stay silent unless there is a blocking prompt or the agent emits an explicit summary marker. Use these prefixes in assistant output:
@@ -197,6 +252,12 @@ Quiet `notify` topics stay silent unless there is a blocking prompt or the agent
 ```
 
 CCGram strips the marker before forwarding the message to Telegram.
+
+For unattended work, this is the expected contract:
+
+- routine progress stays quiet in `notify`
+- blocking prompts surface automatically
+- milestone and final summaries must be explicit
 
 ## Migrating from ccbot
 

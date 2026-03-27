@@ -1,0 +1,33 @@
+{
+  "name": "ccgram-notify",
+  "owner": {
+    "name": "CCGram Notify Contributors"
+  },
+  "metadata": {
+    "description": "Plugin-style marketplace metadata for the CCGram Notify repo.",
+    "version": "0.1.0",
+    "pluginRoot": "."
+  },
+  "plugins": [
+    {
+      "name": "ccgram-notify",
+      "source": ".",
+      "description": "Telegram notify and remote-control workflow for agent CLIs, with Codex-first setup.",
+      "version": "0.1.0",
+      "author": {
+        "name": "CCGram Notify Contributors"
+      },
+      "homepage": "https://github.com/alexei-led/ccgram",
+      "repository": "https://github.com/alexei-led/ccgram",
+      "license": "MIT",
+      "category": "developer-tools",
+      "keywords": [
+        "telegram",
+        "tmux",
+        "codex",
+        "notify",
+        "agents"
+      ]
+    }
+  ]
+}
