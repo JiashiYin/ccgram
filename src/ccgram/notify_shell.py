@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shlex
 import shutil
-import contextlib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .providers import resolve_capabilities
+from .providers import resolve_capabilities, resolve_launch_command
 from .utils import atomic_write_json, ccgram_dir
 
 _SUPPORTED_SHELLS = ("bash", "zsh", "fish")
@@ -241,16 +241,16 @@ def _write_shell_wrapper(path: Path, provider: str, shell: str, direct_path: Pat
 
 
 def _resolve_direct_command(provider: str, existing: dict[str, object] | None) -> str:
-    if existing:
-        direct_command = existing.get("direct_command", "")
-        if isinstance(direct_command, str) and direct_command:
-            return direct_command
-
     env_key = _env_key(provider)
     direct_path = _direct_launcher_path(provider)
     override = os.environ.get(env_key, "")
     if override and override != str(direct_path):
         return override
+
+    if existing:
+        direct_command = existing.get("direct_command", "")
+        if isinstance(direct_command, str) and direct_command:
+            return direct_command
 
     path = shutil.which(provider)
     if path:
@@ -272,6 +272,19 @@ def install_notify_shell(provider: str = "codex", shell: str | None = None) -> N
     existing = providers.get(provider)
     existing_dict = existing if isinstance(existing, dict) else None
     direct_command = _resolve_direct_command(provider, existing_dict)
+
+    if existing_dict:
+        old_rc_path = Path(str(existing_dict.get("rc_path", ""))) if existing_dict.get("rc_path") else None
+        old_snippet_path = (
+            Path(str(existing_dict.get("snippet_path", "")))
+            if existing_dict.get("snippet_path")
+            else None
+        )
+        if old_rc_path and old_rc_path != rc_path:
+            _remove_rc_block(old_rc_path)
+        if old_snippet_path and old_snippet_path != snippet_path:
+            with contextlib.suppress(OSError):
+                old_snippet_path.unlink(missing_ok=True)
 
     _write_direct_launcher(direct_path, direct_command)
     _write_shell_wrapper(snippet_path, provider, shell_name, direct_path)
@@ -394,6 +407,14 @@ def iter_notify_statuses() -> list[NotifyStatus]:
     if not isinstance(providers, dict):
         return []
     return [get_notify_status(provider) for provider in sorted(providers)]
+
+
+def resolve_notify_launch_command(provider: str) -> str:
+    """Resolve the command used for notify-managed provider launches."""
+    status = get_notify_status(provider)
+    if status.installed and status.direct_launcher_exists:
+        return status.env_value or status.direct_launcher_path
+    return resolve_launch_command(provider)
 
 
 def status_to_dict(status: NotifyStatus) -> dict[str, object]:

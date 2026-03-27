@@ -121,6 +121,67 @@ class TestNotifyInstall:
         assert "Shell: bash" in result.output
         assert "Mode: notify" in result.output
 
+    def test_reinstall_with_new_shell_cleans_previous_rc_hook(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        first = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert first.exit_code == 0
+
+        second = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "zsh"]
+        )
+        assert second.exit_code == 0
+
+        assert ">>> ccgram notify >>>" not in (tmp_path / ".bashrc").read_text()
+        assert ">>> ccgram notify >>>" in (tmp_path / ".zshrc").read_text()
+        assert not _notify_snippet_path(tmp_path, "codex", "bash").exists()
+        assert _notify_snippet_path(tmp_path, "codex", "zsh").exists()
+
+    def test_reinstall_refreshes_direct_command_from_env_override(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        first = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert first.exit_code == 0
+
+        monkeypatch.setenv("CCGRAM_CODEX_COMMAND", "/opt/codex/bin/codex --fast")
+        second = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert second.exit_code == 0
+
+        direct_launcher = _direct_launcher_path(tmp_path, "codex")
+        assert "/opt/codex/bin/codex --fast" in direct_launcher.read_text()
+
+    def test_resolve_notify_launch_command_prefers_installed_direct_launcher(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        install = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert install.exit_code == 0
+
+        from ccgram.notify_shell import resolve_notify_launch_command
+
+        assert resolve_notify_launch_command("codex") == str(
+            _direct_launcher_path(tmp_path, "codex")
+        )
+
 
 class TestNotifyLaunch:
     def test_launch_creates_window_and_sets_notify_mode(
@@ -142,8 +203,8 @@ class TestNotifyLaunch:
         )
         monkeypatch.setattr("ccgram.notify_cmd.session_manager", session_manager)
         monkeypatch.setattr(
-            "ccgram.notify_cmd.resolve_launch_command",
-            lambda provider, approval_mode="normal": "/usr/bin/codex",
+            "ccgram.notify_cmd.resolve_notify_launch_command",
+            lambda provider: "/usr/bin/codex",
         )
         monkeypatch.setattr(
             "ccgram.notify_cmd._select_and_attach_window", select_window
@@ -177,6 +238,27 @@ class TestNotifyLaunch:
         session_manager.set_notification_mode.assert_called_once_with("@12", "notify")
         stamp_pane_title.assert_awaited_once_with("@12", "codex")
         select_window.assert_called_once_with("@12")
+
+    def test_attach_uses_interactive_tmux_calls(self, monkeypatch) -> None:
+        calls = []
+
+        def _run(*args, **kwargs):
+            calls.append((args, kwargs))
+            return MagicMock()
+
+        monkeypatch.delenv("TMUX", raising=False)
+        monkeypatch.setenv("TMUX_SESSION_NAME", "ccgram")
+        monkeypatch.setattr("ccgram.notify_cmd.subprocess.run", _run)
+
+        from ccgram.notify_cmd import _select_and_attach_window
+
+        _select_and_attach_window("@7")
+
+        assert calls[0][0][0] == ["tmux", "select-window", "-t", "ccgram:@7"]
+        assert calls[0][1]["capture_output"] is True
+        assert calls[1][0][0] == ["tmux", "attach-session", "-t", "ccgram"]
+        assert "capture_output" not in calls[1][1]
+        assert "timeout" not in calls[1][1]
 
 
 class TestNotifyStatusMain:

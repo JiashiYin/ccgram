@@ -14,9 +14,9 @@ from .notify_shell import (
     disable_notify_shell,
     get_notify_status,
     install_notify_shell,
+    resolve_notify_launch_command,
     uninstall_notify_shell,
 )
-from .providers import resolve_launch_command
 from .utils import tmux_session_name
 
 _NOTIFY_MODES = ("notify", "interactive")
@@ -70,17 +70,11 @@ def _select_and_attach_window(window_id: str) -> None:
         subprocess.run(
             ["tmux", "switch-client", "-t", session_name],
             check=True,
-            timeout=5,
-            capture_output=True,
-            text=True,
         )
         return
     subprocess.run(
         ["tmux", "attach-session", "-t", session_name],
         check=True,
-        timeout=5,
-        capture_output=True,
-        text=True,
     )
 
 
@@ -92,7 +86,7 @@ async def _launch_session(
     attach: bool,
     agent_args: str,
 ) -> tuple[str, str]:
-    launch_command = resolve_launch_command(provider)
+    launch_command = resolve_notify_launch_command(provider)
     success, message, _window_name, window_id = await tmux_manager.create_window(
         work_dir=cwd,
         launch_command=launch_command,
