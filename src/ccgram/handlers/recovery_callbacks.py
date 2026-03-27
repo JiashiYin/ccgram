@@ -375,6 +375,7 @@ async def _create_and_bind_window(
     # Propagate provider to new window
     session_manager.set_window_provider(created_wid, provider.capabilities.name)
     session_manager.set_window_approval_mode(created_wid, approval_mode)
+    session_manager.set_notification_mode(created_wid, "interactive")
 
     session_manager.bind_thread(
         user_id, thread_id, created_wid, window_name=created_wname

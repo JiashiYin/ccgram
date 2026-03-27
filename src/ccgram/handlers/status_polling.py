@@ -467,7 +467,7 @@ async def _transition_to_idle(
     await update_topic_emoji(bot, chat_id, thread_id, "idle", display)
     _clear_autoclose_if_active(user_id, thread_id)
     _get_topic_state(user_id, thread_id).last_typing_sent = None
-    if notif_mode not in ("muted", "errors_only"):
+    if notif_mode not in ("notify", "muted", "errors_only"):
         from .callback_data import IDLE_STATUS_TEXT
 
         await enqueue_status_update(
@@ -892,7 +892,7 @@ async def update_status_message(
         ws.has_seen_status = True
         ws.startup_time = None
         await _send_typing_throttled(bot, user_id, thread_id)
-        if notif_mode not in ("muted", "errors_only"):
+        if notif_mode not in ("notify", "muted", "errors_only"):
             # Append subagent names if any are active
             from .hook_events import build_subagent_label, get_subagent_names
 
@@ -1112,6 +1112,7 @@ async def _maybe_discover_transcript(
     state = session_manager.window_states.get(window_id)
     if not state:
         return
+    original_provider_name = state.provider_name
 
     w = _window or await tmux_manager.find_window_by_id(window_id)
 
@@ -1219,6 +1220,11 @@ async def _maybe_discover_transcript(
                 transcript_path=event.transcript_path,
                 provider_name=provider_name,
             )
+            if (
+                (not original_provider_name or state.external)
+                and session_manager.get_notification_mode(window_id) == "interactive"
+            ):
+                session_manager.set_notification_mode(window_id, "notify")
             await asyncio.to_thread(
                 session_manager.write_hookless_session_map,
                 window_id=window_id,

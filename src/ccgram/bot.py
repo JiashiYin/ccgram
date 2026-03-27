@@ -1418,25 +1418,30 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             window_id=window_id, session_id=msg.session_id
         )
         # Check notification mode — skip suppressed messages.
-        # All tool_use/tool_result MUST pass through regardless of mode: the message
-        # queue edits tool_use messages in-place when tool_result arrives, so filtering
-        # one half would break pairing and leave orphaned messages. This means muted/
-        # errors_only sessions still deliver tool flow — an accepted trade-off.
+        # Tool-use/result pairs stay intact for muted/errors_only topics because the
+        # queue edits tool_use messages in-place when tool_result arrives. Notify mode
+        # is stricter: only phone-actionable interactive prompts should break through.
         notif_mode = session_manager.get_notification_mode(window_id)
-        is_tool_flow = msg.tool_name in INTERACTIVE_TOOL_NAMES or msg.content_type in (
+        is_interactive_tool = (
+            msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use"
+        )
+        is_tool_flow = msg.content_type in (
             "tool_use",
             "tool_result",
         )
-        if not is_tool_flow:
-            if notif_mode == "muted":
+        if not is_interactive_tool and get_interactive_msg_id(user_id, thread_id):
+            await clear_interactive_msg(user_id, bot, thread_id)
+        if notif_mode == "muted":
+            if not is_tool_flow:
                 continue
-            if notif_mode == "errors_only" and not _ERROR_KEYWORDS_RE.search(
-                msg.text or ""
-            ):
+        elif notif_mode == "errors_only":
+            if not is_tool_flow and not _ERROR_KEYWORDS_RE.search(msg.text or ""):
                 continue
+        elif notif_mode == "notify" and not is_interactive_tool:
+            continue
 
         # Handle interactive tools specially - capture terminal and send UI
-        if msg.tool_name in INTERACTIVE_TOOL_NAMES and msg.content_type == "tool_use":
+        if is_interactive_tool:
             # Mark interactive mode BEFORE sleeping so polling skips this window
             set_interactive_mode(user_id, window_id, thread_id)
             # Flush pending messages (e.g. plan content) before sending interactive UI
@@ -1461,10 +1466,6 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             else:
                 # UI not rendered — clear the early-set mode
                 clear_interactive_mode(user_id, thread_id)
-
-        # Any non-interactive message means the interaction is complete — delete the UI message
-        if get_interactive_msg_id(user_id, thread_id):
-            await clear_interactive_msg(user_id, bot, thread_id)
 
         parts = build_response_parts(
             msg.text,
@@ -1629,6 +1630,9 @@ async def _handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
                 session_manager.set_group_chat_id(
                     first_user_id, topic.message_thread_id, chat_id
                 )
+
+            if session_manager.get_notification_mode(event.window_id) == "interactive":
+                session_manager.set_notification_mode(event.window_id, "notify")
         except RetryAfter as e:
             retry_after_seconds = (
                 e.retry_after

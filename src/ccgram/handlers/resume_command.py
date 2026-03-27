@@ -310,6 +310,7 @@ async def _create_resume_window(
             await session_manager.wait_for_session_map_entry(created_wid)
         session_manager.set_window_provider(created_wid, provider.capabilities.name)
         session_manager.set_window_approval_mode(created_wid, approval_mode)
+        session_manager.set_notification_mode(created_wid, "interactive")
 
     return success, message, created_wname, created_wid
 

@@ -518,6 +518,7 @@ async def _create_window_and_bind(
     window_state.cwd = selected_path
     session_manager.set_window_provider(created_wid, provider_name)
     session_manager.set_window_approval_mode(created_wid, approval_mode)
+    session_manager.set_notification_mode(created_wid, "interactive")
     logger.info(
         "Window created: %s (id=%s) at %s provider=%s mode=%s (user=%d, thread=%s)",
         created_wname,

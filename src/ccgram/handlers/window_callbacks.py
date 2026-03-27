@@ -183,6 +183,7 @@ async def _handle_bind(
     display = w.window_name
     clear_window_picker_state(context.user_data)
     session_manager.bind_thread(user_id, thread_id, selected_wid, window_name=display)
+    session_manager.set_notification_mode(selected_wid, "interactive")
     _store_group_chat_id(user_id, thread_id, update, query)
 
     detected = await _detect_and_setup_provider(

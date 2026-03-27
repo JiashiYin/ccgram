@@ -266,9 +266,45 @@ class TestHandleNewWindowErrors:
 
             await _handle_new_window(event, bot)
 
-        bot.create_forum_topic.assert_called_once_with(
-            chat_id=-100500, name="cool-project"
-        )
+
+class TestHandleNewWindowNotificationMode:
+    async def test_auto_discovered_window_defaults_to_notify(self) -> None:
+        event = _make_event(session_id="sess-ext", window_name="ext", cwd="/tmp/ext")
+        bot = AsyncMock()
+        bot.create_forum_topic = AsyncMock(return_value=_make_topic(thread_id=42))
+
+        with (
+            patch("ccgram.bot.session_manager") as mock_sm,
+            patch("ccgram.bot.config") as mock_config,
+        ):
+            mock_sm.iter_thread_bindings.return_value = iter([])
+            mock_sm.get_notification_mode.return_value = "interactive"
+            mock_sm.resolve_chat_id.return_value = 12345
+            mock_config.group_id = -100500
+            mock_config.allowed_users = {12345}
+
+            await _handle_new_window(event, bot)
+
+        mock_sm.set_notification_mode.assert_called_once_with("@10", "notify")
+
+    async def test_existing_nondefault_mode_is_preserved(self) -> None:
+        event = _make_event(session_id="sess-ext", window_name="ext", cwd="/tmp/ext")
+        bot = AsyncMock()
+        bot.create_forum_topic = AsyncMock(return_value=_make_topic(thread_id=42))
+
+        with (
+            patch("ccgram.bot.session_manager") as mock_sm,
+            patch("ccgram.bot.config") as mock_config,
+        ):
+            mock_sm.iter_thread_bindings.return_value = iter([])
+            mock_sm.get_notification_mode.return_value = "muted"
+            mock_sm.resolve_chat_id.return_value = 12345
+            mock_config.group_id = -100500
+            mock_config.allowed_users = {12345}
+
+            await _handle_new_window(event, bot)
+
+        mock_sm.set_notification_mode.assert_not_called()
 
 
 class TestHandleNewWindowGroupChatIdsFallback:

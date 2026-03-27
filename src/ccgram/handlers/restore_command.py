@@ -83,6 +83,7 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     session_manager.set_window_provider(wid, provider.capabilities.name)
     session_manager.set_window_approval_mode(wid, approval_mode)
+    session_manager.set_notification_mode(wid, "interactive")
     session_manager.bind_thread(user_id, thread_id, wid, window_name=wname)
     if update.message.chat.type in ("group", "supergroup"):
         session_manager.set_group_chat_id(user_id, thread_id, update.message.chat.id)

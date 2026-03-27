@@ -3,7 +3,7 @@ activity heuristic, and startup timeout."""
 
 import time
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from telegram import Bot
@@ -567,6 +567,15 @@ def _mock_update_status_patches(*, pyte_result, provider):
             return_value=pyte_result,
         )
     )
+    mocks["emoji"] = stack.enter_context(
+        patch("ccgram.handlers.status_polling.update_topic_emoji")
+    )
+    mocks["typing"] = stack.enter_context(
+        patch("ccgram.handlers.status_polling._send_typing_throttled")
+    )
+    mocks["interactive"] = stack.enter_context(
+        patch("ccgram.handlers.status_polling.handle_interactive_ui")
+    )
 
     mock_window = MagicMock()
     mock_window.window_id = "@0"
@@ -637,6 +646,49 @@ class TestPyteFallbackInUpdateStatus:
             mocks["enqueue"].assert_called_once()
             assert mocks["enqueue"].call_args[0][3] == "\U0001f4d6 reading\u2026"
 
+    async def test_notify_mode_suppresses_regular_status_updates(self) -> None:
+        from ccgram.providers.base import StatusUpdate
+
+        pyte_status = StatusUpdate(
+            raw_text="Working",
+            display_label="\u272b Working",
+        )
+        stack, mocks = _mock_update_status_patches(
+            pyte_result=pyte_status, provider=make_mock_provider(has_status=True)
+        )
+        with stack:
+            from ccgram.handlers.status_polling import update_status_message
+
+            mocks["sm"].get_notification_mode.return_value = "notify"
+            await update_status_message(AsyncMock(spec=Bot), 1, "@0", thread_id=42)
+
+        mocks["enqueue"].assert_not_called()
+        mocks["emoji"].assert_called_once_with(
+            ANY, -100, 42, "active", "project"
+        )
+        mocks["typing"].assert_called_once_with(ANY, 1, 42)
+
+    async def test_notify_mode_still_handles_interactive_ui(self) -> None:
+        from ccgram.providers.base import StatusUpdate
+
+        interactive_status = StatusUpdate(
+            raw_text="Would you like to proceed?",
+            display_label="Permission prompt",
+            is_interactive=True,
+            ui_type="PermissionPrompt",
+        )
+        stack, mocks = _mock_update_status_patches(
+            pyte_result=interactive_status, provider=make_mock_provider(has_status=True)
+        )
+        with stack:
+            from ccgram.handlers.status_polling import update_status_message
+
+            mocks["sm"].get_notification_mode.return_value = "notify"
+            await update_status_message(AsyncMock(spec=Bot), 1, "@0", thread_id=42)
+
+        mocks["interactive"].assert_called_once_with(ANY, 1, "@0", 42)
+        mocks["enqueue"].assert_not_called()
+
 
 class TestClearSeenStatus:
     def test_clears_seen_status_and_startup(self) -> None:
@@ -673,7 +725,7 @@ class TestTransitionToIdle:
         assert mock_enqueue.call_args[0][3] == IDLE_STATUS_TEXT
         assert mock_enqueue.call_args[1]["thread_id"] == 42
 
-    @pytest.mark.parametrize("mode", ["muted", "errors_only"])
+    @pytest.mark.parametrize("mode", ["notify", "muted", "errors_only"])
     async def test_suppressed_mode_clears_status_no_timer(self, mode: str) -> None:
         from ccgram.handlers.status_polling import _transition_to_idle
 
