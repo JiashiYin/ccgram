@@ -1055,6 +1055,16 @@ class TestProviderSwitchPromptSetup:
 
 
 class TestMaybeDiscoverTranscript:
+    @pytest.fixture(autouse=True)
+    def _inline_to_thread(self, monkeypatch) -> None:
+        async def _run_inline(fn, /, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "ccgram.handlers.status_polling.asyncio.to_thread",
+            _run_inline,
+        )
+
     async def test_noop_when_discovered_session_matches_current(self) -> None:
         from ccgram.handlers.status_polling import _maybe_discover_transcript
         from ccgram.providers.base import SessionStartEvent
