@@ -419,6 +419,11 @@ def iter_notify_statuses() -> list[NotifyStatus]:
     return [get_notify_status(provider) for provider in sorted(providers)]
 
 
+def any_notify_providers_enabled() -> bool:
+    """Return True when any provider still has notify shell integration enabled."""
+    return any(status.enabled for status in iter_notify_statuses())
+
+
 def resolve_notify_launch_command(provider: str) -> str:
     """Resolve the command used for notify-managed provider launches."""
     status = get_notify_status(provider)

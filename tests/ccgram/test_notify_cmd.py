@@ -3,6 +3,7 @@
 import contextlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -34,7 +35,91 @@ def _clear_telegram_env(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _stub_notify_service(monkeypatch, tmp_path: Path) -> None:
+    state = {
+        "installed": False,
+        "enabled": False,
+        "running": False,
+        "pid": None,
+        "log_path": str(tmp_path / "notify.log"),
+        "command": ["/usr/bin/ccgram", "run"],
+    }
+
+    def _status() -> SimpleNamespace:
+        return SimpleNamespace(**state)
+
+    def _ensure() -> SimpleNamespace:
+        state.update(
+            {
+                "installed": True,
+                "enabled": True,
+                "running": True,
+                "pid": 4321,
+            }
+        )
+        return _status()
+
+    def _disable() -> SimpleNamespace:
+        state.update({"installed": True, "enabled": False, "running": False, "pid": None})
+        return _status()
+
+    def _uninstall() -> SimpleNamespace:
+        state.update(
+            {
+                "installed": False,
+                "enabled": False,
+                "running": False,
+                "pid": None,
+            }
+        )
+        return _status()
+
+    monkeypatch.setattr(
+        "ccgram.notify_cmd.ensure_notify_service_running", _ensure, raising=False
+    )
+    monkeypatch.setattr(
+        "ccgram.notify_cmd.get_notify_service_status", _status, raising=False
+    )
+    monkeypatch.setattr(
+        "ccgram.notify_cmd.disable_notify_service", _disable, raising=False
+    )
+    monkeypatch.setattr(
+        "ccgram.notify_cmd.uninstall_notify_service", _uninstall, raising=False
+    )
+
+
 class TestNotifyInstall:
+    def test_install_starts_background_service(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        ensure_service = MagicMock(
+            return_value=SimpleNamespace(
+                installed=True,
+                enabled=True,
+                running=True,
+                pid=4321,
+                log_path=str(tmp_path / "notify.log"),
+            )
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.ensure_notify_service_running",
+            ensure_service,
+            raising=False,
+        )
+
+        result = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+
+        assert result.exit_code == 0
+        ensure_service.assert_called_once_with()
+
     def test_install_prompts_for_missing_telegram_config_and_persists_it(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -302,6 +387,48 @@ class TestNotifyInstall:
 
 
 class TestNotifyLaunch:
+    def test_launch_ensures_background_service_is_running(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+        create_window = AsyncMock(return_value=(True, "Created window", "proj", "@12"))
+        stamp_pane_title = AsyncMock()
+        ensure_service = MagicMock()
+
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.tmux_manager.create_window", create_window
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.tmux_manager.stamp_pane_title", stamp_pane_title
+        )
+        monkeypatch.setattr("ccgram.notify_cmd.session_manager", MagicMock())
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.resolve_notify_launch_command",
+            lambda provider: "/usr/bin/codex",
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.ensure_notify_service_running",
+            ensure_service,
+            raising=False,
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "notify",
+                "launch",
+                "--provider",
+                "codex",
+                "--cwd",
+                str(tmp_path),
+            ],
+        )
+
+        assert result.exit_code == 0
+        ensure_service.assert_called_once_with()
+
     def test_launch_creates_window_and_sets_notify_mode(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -439,6 +566,38 @@ class TestNotifyLaunch:
 
 
 class TestNotifyStatusMain:
+    def test_status_reports_background_service(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(
+                installed=True,
+                enabled=True,
+                running=True,
+                pid=4321,
+                log_path=str(tmp_path / "notify.log"),
+                command=["/usr/bin/ccgram", "run"],
+            ),
+            raising=False,
+        )
+
+        install = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert install.exit_code == 0
+
+        result = runner.invoke(cli, ["notify", "status", "--provider", "codex"])
+
+        assert result.exit_code == 0
+        assert "Service: running" in result.output
+        assert "PID: 4321" in result.output
+
     def test_status_main_shows_notify_integration(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
@@ -465,3 +624,65 @@ class TestNotifyStatusMain:
 
         captured = capsys.readouterr()
         assert "Notify shell: codex enabled (bash, notify)" in captured.out
+
+
+class TestNotifyDisableAndUninstall:
+    def test_disable_stops_service_when_no_notify_providers_remain_enabled(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        install = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert install.exit_code == 0
+
+        disable_service = MagicMock()
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.any_notify_providers_enabled",
+            lambda: False,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.disable_notify_service",
+            disable_service,
+            raising=False,
+        )
+
+        result = runner.invoke(cli, ["notify", "disable", "--provider", "codex"])
+
+        assert result.exit_code == 0
+        disable_service.assert_called_once_with()
+
+    def test_uninstall_stops_service_when_no_notify_providers_remain_enabled(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        install = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert install.exit_code == 0
+
+        uninstall_service = MagicMock()
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.any_notify_providers_enabled",
+            lambda: False,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.uninstall_notify_service",
+            uninstall_service,
+            raising=False,
+        )
+
+        result = runner.invoke(cli, ["notify", "uninstall", "--provider", "codex"])
+
+        assert result.exit_code == 0
+        uninstall_service.assert_called_once_with()

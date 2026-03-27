@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .notify_service import get_notify_service_status
 from .notify_shell import iter_notify_statuses
 from .utils import ccgram_dir, tmux_session_name
 
@@ -112,6 +113,15 @@ def status_main() -> None:
             )
     else:
         print("Notify shell: not installed")
+    service_status = get_notify_service_status()
+    service_state = (
+        "running"
+        if service_status.running
+        else "stopped"
+        if service_status.installed
+        else "not installed"
+    )
+    print(f"Notify service: {service_state}")
     print(f"Tmux session: {session_name} ({len(live_windows)} windows)")
     print(f"Monitored sessions: {monitored}")
 

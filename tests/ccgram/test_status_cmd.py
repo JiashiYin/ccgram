@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+from types import SimpleNamespace
 
 from ccgram.status_cmd import _read_json, status_main
 
@@ -26,6 +27,10 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "test-session")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
 
         with contextlib.suppress(SystemExit):
             status_main()
@@ -38,6 +43,10 @@ class TestStatusMain:
     def test_with_bound_window(self, tmp_path, monkeypatch, capsys) -> None:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "ccgram")
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
 
         state = {
             "thread_bindings": {"12345": {"42": "@5"}},
@@ -69,6 +78,10 @@ class TestStatusMain:
     def test_dead_binding(self, tmp_path, monkeypatch, capsys) -> None:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "ccgram")
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
 
         state = {
             "thread_bindings": {"12345": {"42": "@5"}},
@@ -88,6 +101,10 @@ class TestStatusMain:
     def test_unbound_window(self, tmp_path, monkeypatch, capsys) -> None:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "ccgram")
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
 
         monkeypatch.setattr(
             "ccgram.status_cmd._list_tmux_windows",
@@ -106,6 +123,10 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_PROVIDER", "claude")
         monkeypatch.setenv("TMUX_SESSION_NAME", "test")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
 
         with contextlib.suppress(SystemExit):
             status_main()
@@ -122,6 +143,10 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_PROVIDER", "codex")
         monkeypatch.setenv("TMUX_SESSION_NAME", "test")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
 
         with contextlib.suppress(SystemExit):
             status_main()
@@ -129,3 +154,18 @@ class TestStatusMain:
         captured = capsys.readouterr()
         assert "Provider: codex" in captured.out
         assert "hook" not in captured.out.split("Provider:")[1].split("\n")[0]
+
+    def test_shows_notify_service_state(self, tmp_path, monkeypatch, capsys) -> None:
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("TMUX_SESSION_NAME", "test")
+        monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=True, running=True),
+        )
+
+        with contextlib.suppress(SystemExit):
+            status_main()
+
+        captured = capsys.readouterr()
+        assert "Notify service: running" in captured.out

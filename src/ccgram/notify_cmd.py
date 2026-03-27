@@ -11,7 +11,15 @@ from pathlib import Path
 import click
 
 from .notify_onboarding import persist_telegram_setup, resolve_telegram_setup
+from .notify_service import (
+    disable_notify_service,
+    ensure_notify_service_running,
+    format_notify_service_status,
+    get_notify_service_status,
+    uninstall_notify_service,
+)
 from .notify_shell import (
+    any_notify_providers_enabled,
     disable_notify_shell,
     get_notify_status,
     install_notify_shell,
@@ -58,6 +66,8 @@ def _print_notify_status(provider: str) -> None:
         print(f"RC file: {status.rc_path}")
         print(f"Snippet: {status.snippet_path}")
         print(f"Direct launcher: {status.direct_launcher_path}")
+    for line in format_notify_service_status(get_notify_service_status()):
+        print(line)
 
 
 def _select_and_attach_window(window_id: str) -> None:
@@ -89,6 +99,7 @@ async def _launch_session(
     attach: bool,
     agent_args: str,
 ) -> tuple[str, str]:
+    ensure_notify_service_running()
     launch_command = resolve_notify_launch_command(provider)
     success, message, _window_name, window_id = await tmux_manager.create_window(
         work_dir=cwd,
@@ -148,10 +159,14 @@ def notify_install_cmd(
     )
     dotenv_path = persist_telegram_setup(setup)
     status = install_notify_shell(provider=provider, shell=shell_name)
+    service_status = ensure_notify_service_running()
     print(f"Stored Telegram config in {dotenv_path}.")
     print(
         f"Installed notify shell integration for {provider} ({status.shell}). "
         f"New shells will route `{provider}` through ccgram notify."
+    )
+    print(
+        f"Background service {'running' if service_status.running else 'stopped'}."
     )
     _print_notify_status(provider)
 
@@ -168,6 +183,8 @@ def notify_status_cmd(provider: str) -> None:
 def notify_disable_cmd(provider: str) -> None:
     """Disable shell interception without removing installed artifacts."""
     disable_notify_shell(provider)
+    if not any_notify_providers_enabled():
+        disable_notify_service()
     print(f"Disabled notify shell integration for {provider}.")
     _print_notify_status(provider)
 
@@ -177,6 +194,8 @@ def notify_disable_cmd(provider: str) -> None:
 def notify_uninstall_cmd(provider: str) -> None:
     """Remove notify shell integration and direct-launch override."""
     uninstall_notify_shell(provider)
+    if not any_notify_providers_enabled():
+        uninstall_notify_service()
     print(f"Uninstalled notify shell integration for {provider}.")
     _print_notify_status(provider)
 

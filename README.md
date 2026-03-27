@@ -188,6 +188,7 @@ ccgram notify install \
 ```
 
 After this one-time step, typing plain `codex` routes into the monitored tmux workflow and defaults to `notify`.
+The installer also starts the local `ccgram` background bridge for you, and plain `codex` launches re-check it on demand so daily shutdown/reboot cycles do not require manual recovery.
 
 ### Install hooks (Claude Code only)
 
@@ -225,7 +226,7 @@ After `ccgram notify install`, normal `codex` launches default to `notify`:
 codex
 ```
 
-That launch enters the monitored tmux workflow, can proactively message you in Telegram when it blocks, and still supports phone-side approvals through the existing interactive UI bridge.
+That launch enters the monitored tmux workflow, ensures the local background bridge is running, can proactively message you in Telegram when it blocks, and still supports phone-side approvals through the existing interactive UI bridge.
 
 Telegram-created sessions stay `interactive`, so the user-opened topic remains fully chatty like a remote terminal.
 
@@ -236,6 +237,8 @@ Check current shell integration:
 ```bash
 ccgram notify status
 ```
+
+This now shows both the shell wrapper state and the local background bridge state.
 
 Temporarily stop intercepting plain `codex` without removing the rest of the setup:
 
