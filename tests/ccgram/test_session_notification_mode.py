@@ -67,7 +67,12 @@ class TestNotificationMode:
 class TestWindowStateSerialization:
     @pytest.mark.parametrize(
         ("mode", "expect_key"),
-        [("interactive", False), ("notify", True), ("errors_only", True), ("muted", True)],
+        [
+            ("interactive", False),
+            ("notify", True),
+            ("errors_only", True),
+            ("muted", True),
+        ],
     )
     def test_to_dict_notification_mode(self, mode: str, expect_key: bool) -> None:
         ws = WindowState(session_id="s1", cwd="/tmp", notification_mode=mode)

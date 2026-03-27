@@ -30,7 +30,9 @@ class TestNotifyInstall:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
 
-        result = runner.invoke(cli, ["notify", "install", "--provider", "codex", "--shell", "bash"])
+        result = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
 
         assert result.exit_code == 0
 
@@ -190,14 +192,14 @@ class TestNotifyLaunch:
         runner = CliRunner()
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
 
-        create_window = AsyncMock(
-            return_value=(True, "Created window", "proj", "@12")
-        )
+        create_window = AsyncMock(return_value=(True, "Created window", "proj", "@12"))
         stamp_pane_title = AsyncMock()
         select_window = MagicMock()
         session_manager = MagicMock()
 
-        monkeypatch.setattr("ccgram.notify_cmd.tmux_manager.create_window", create_window)
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.tmux_manager.create_window", create_window
+        )
         monkeypatch.setattr(
             "ccgram.notify_cmd.tmux_manager.stamp_pane_title", stamp_pane_title
         )

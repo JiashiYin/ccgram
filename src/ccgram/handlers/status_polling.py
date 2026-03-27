@@ -1221,9 +1221,8 @@ async def _maybe_discover_transcript(
                 provider_name=provider_name,
             )
             if (
-                (not original_provider_name or state.external)
-                and session_manager.get_notification_mode(window_id) == "interactive"
-            ):
+                not original_provider_name or state.external
+            ) and session_manager.get_notification_mode(window_id) == "interactive":
                 session_manager.set_notification_mode(window_id, "notify")
             await asyncio.to_thread(
                 session_manager.write_hookless_session_map,

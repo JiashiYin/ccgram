@@ -663,9 +663,7 @@ class TestPyteFallbackInUpdateStatus:
             await update_status_message(AsyncMock(spec=Bot), 1, "@0", thread_id=42)
 
         mocks["enqueue"].assert_not_called()
-        mocks["emoji"].assert_called_once_with(
-            ANY, -100, 42, "active", "project"
-        )
+        mocks["emoji"].assert_called_once_with(ANY, -100, 42, "active", "project")
         mocks["typing"].assert_called_once_with(ANY, 1, 42)
 
     async def test_notify_mode_still_handles_interactive_ui(self) -> None:

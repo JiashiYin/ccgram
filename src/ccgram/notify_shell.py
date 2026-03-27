@@ -54,7 +54,7 @@ def _load_state() -> dict[str, object]:
         return {_STATE_PROVIDERS_KEY: {}}
     try:
         raw = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return {_STATE_PROVIDERS_KEY: {}}
     if not isinstance(raw, dict):
         return {_STATE_PROVIDERS_KEY: {}}
@@ -229,13 +229,15 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
         )
     return (
         f"{provider}() {{\n"
-        f"  command ccgram notify launch --provider {provider} --attach -- \"$@\"\n"
+        f'  command ccgram notify launch --provider {provider} --attach -- "$@"\n'
         "}\n\n"
         f"alias {provider}-direct={quoted_direct}\n"
     )
 
 
-def _write_shell_wrapper(path: Path, provider: str, shell: str, direct_path: Path) -> None:
+def _write_shell_wrapper(
+    path: Path, provider: str, shell: str, direct_path: Path
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_shell_wrapper(provider, shell, direct_path))
 
@@ -258,7 +260,9 @@ def _resolve_direct_command(provider: str, existing: dict[str, object] | None) -
     return resolve_capabilities(provider).launch_command
 
 
-def install_notify_shell(provider: str = "codex", shell: str | None = None) -> NotifyStatus:
+def install_notify_shell(
+    provider: str = "codex", shell: str | None = None
+) -> NotifyStatus:
     """Install or refresh shell integration for a provider."""
     provider = provider.lower()
     shell_name = _normalize_shell(shell)
@@ -274,7 +278,11 @@ def install_notify_shell(provider: str = "codex", shell: str | None = None) -> N
     direct_command = _resolve_direct_command(provider, existing_dict)
 
     if existing_dict:
-        old_rc_path = Path(str(existing_dict.get("rc_path", ""))) if existing_dict.get("rc_path") else None
+        old_rc_path = (
+            Path(str(existing_dict.get("rc_path", "")))
+            if existing_dict.get("rc_path")
+            else None
+        )
         old_snippet_path = (
             Path(str(existing_dict.get("snippet_path", "")))
             if existing_dict.get("snippet_path")
@@ -315,7 +323,9 @@ def disable_notify_shell(provider: str = "codex") -> NotifyStatus:
     if not isinstance(existing, dict):
         return get_notify_status(provider)
 
-    rc_path = Path(str(existing.get("rc_path", ""))) if existing.get("rc_path") else None
+    rc_path = (
+        Path(str(existing.get("rc_path", ""))) if existing.get("rc_path") else None
+    )
     if rc_path:
         _remove_rc_block(rc_path)
     existing["enabled"] = False

@@ -12,6 +12,8 @@ from ccgram.handlers.window_callbacks import _handle_bind
 from ccgram.handlers.user_state import PENDING_THREAD_ID, RECOVERY_WINDOW_ID
 from ccgram.session_monitor import NewMessage
 from ccgram.session import WindowState
+
+
 def _make_query(thread_id: int = 42) -> MagicMock:
     query = MagicMock()
     query.answer = AsyncMock()
@@ -101,7 +103,9 @@ class TestTelegramCreatedFlowsStayInteractive:
         with (
             patch("ccgram.handlers.recovery_callbacks.tmux_manager") as mock_tm,
             patch("ccgram.handlers.recovery_callbacks.session_manager") as mock_sm,
-            patch("ccgram.handlers.recovery_callbacks.get_provider_for_window") as mock_gpw,
+            patch(
+                "ccgram.handlers.recovery_callbacks.get_provider_for_window"
+            ) as mock_gpw,
             patch("ccgram.handlers.recovery_callbacks.safe_edit"),
             patch("ccgram.handlers.recovery_callbacks.format_topic_name_for_mode"),
             patch("ccgram.handlers.status_polling.clear_dead_notification"),
@@ -158,7 +162,9 @@ class TestTelegramCreatedFlowsStayInteractive:
             patch("ccgram.handlers.restore_command.config") as mock_cfg,
             patch("ccgram.handlers.restore_command.session_manager") as mock_sm,
             patch("ccgram.handlers.restore_command.tmux_manager") as mock_tm,
-            patch("ccgram.handlers.restore_command.get_provider_for_window") as mock_gpw,
+            patch(
+                "ccgram.handlers.restore_command.get_provider_for_window"
+            ) as mock_gpw,
             patch("ccgram.handlers.restore_command.resolve_launch_command"),
             patch("ccgram.handlers.restore_command.safe_reply"),
             patch("ccgram.handlers.restore_command.clear_dead_notification"),
@@ -217,7 +223,9 @@ class TestNotifyModeMessageRouting:
             patch(
                 "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
             ) as mock_enqueue,
-            patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
+            patch(
+                "ccgram.bot.clear_interactive_msg", new_callable=AsyncMock
+            ) as mock_clear,
             patch("ccgram.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
@@ -239,7 +247,9 @@ class TestNotifyModeMessageRouting:
             patch(
                 "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
             ) as mock_enqueue,
-            patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
+            patch(
+                "ccgram.bot.clear_interactive_msg", new_callable=AsyncMock
+            ) as mock_clear,
             patch("ccgram.bot.get_interactive_msg_id", return_value=99),
         ):
             mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
@@ -303,7 +313,9 @@ class TestNotifyModeMessageRouting:
             patch(
                 "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
             ) as mock_enqueue,
-            patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
+            patch(
+                "ccgram.bot.clear_interactive_msg", new_callable=AsyncMock
+            ) as mock_clear,
             patch("ccgram.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
@@ -341,7 +353,9 @@ class TestNotifyModeMessageRouting:
             patch(
                 "ccgram.bot.enqueue_content_message", new_callable=AsyncMock
             ) as mock_enqueue,
-            patch("ccgram.bot.clear_interactive_msg", new_callable=AsyncMock) as mock_clear,
+            patch(
+                "ccgram.bot.clear_interactive_msg", new_callable=AsyncMock
+            ) as mock_clear,
             patch("ccgram.bot.get_interactive_msg_id", return_value=None),
         ):
             mock_sm.find_users_for_session.return_value = [(100, "@7", 42)]
@@ -357,5 +371,7 @@ class TestNotifyModeMessageRouting:
             "assistant",
         )
         mock_enqueue.assert_awaited_once()
-        assert mock_enqueue.await_args.kwargs["text"] == "finished sync and tests passed"
+        assert (
+            mock_enqueue.await_args.kwargs["text"] == "finished sync and tests passed"
+        )
         mock_clear.assert_not_called()

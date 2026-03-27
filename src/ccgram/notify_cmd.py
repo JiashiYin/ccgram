@@ -48,7 +48,9 @@ session_manager = _LazySessionManagerProxy()
 def _print_notify_status(provider: str) -> None:
     status = get_notify_status(provider)
     print(f"Provider: {provider}")
-    print(f"Status: {'enabled' if status.enabled else 'disabled' if status.installed else 'not installed'}")
+    print(
+        f"Status: {'enabled' if status.enabled else 'disabled' if status.installed else 'not installed'}"
+    )
     if status.installed:
         print(f"Shell: {status.shell}")
         print(f"Mode: {status.mode}")
