@@ -506,6 +506,30 @@ class TestSetWindowProvider:
         mgr.set_window_provider("@1", "codex")
         assert mgr.window_states["@1"].provider_name == "codex"
 
+    @pytest.mark.parametrize("provider_name", ["claude", "codex", "gemini", "shell"])
+    def test_registers_providers_when_registry_is_empty(
+        self, mgr: SessionManager, provider_name: str
+    ) -> None:
+        import ccgram.providers as providers_module
+        from ccgram.providers.registry import registry
+
+        providers_snapshot = dict(registry._providers)
+        instances_snapshot = dict(registry._instances)
+        registered_snapshot = providers_module._registered
+        registry._providers.clear()
+        registry._instances.clear()
+        providers_module._registered = False
+
+        try:
+            mgr.set_window_provider("@1", provider_name)
+            assert mgr.window_states["@1"].provider_name == provider_name
+        finally:
+            registry._providers.clear()
+            registry._providers.update(providers_snapshot)
+            registry._instances.clear()
+            registry._instances.update(instances_snapshot)
+            providers_module._registered = registered_snapshot
+
     def test_get_unset_returns_empty(self, mgr: SessionManager) -> None:
         state = mgr.window_states.get("@99")
         assert state is None

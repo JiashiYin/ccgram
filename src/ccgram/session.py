@@ -1044,8 +1044,9 @@ class SessionManager:
         # clear stale session data that would otherwise cause the poll loop
         # to re-detect the old provider from session_map.json.
         if old_provider != provider_name and provider_name:
-            from .providers import registry
+            from .providers import _ensure_registered, registry
 
+            _ensure_registered()
             new_prov = registry.get(provider_name)
             if not new_prov.capabilities.supports_hook:
                 if state.session_id:

@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from click.testing import CliRunner
 
 from ccgram.cli import cli
+from ccgram.session import SessionManager
 
 
 def _notify_state_path(config_dir: Path) -> Path:
@@ -354,6 +356,65 @@ class TestNotifyLaunch:
         session_manager.set_notification_mode.assert_called_once_with("@12", "notify")
         stamp_pane_title.assert_awaited_once_with("@12", "codex")
         select_window.assert_called_once_with("@12")
+
+    @pytest.mark.parametrize("provider_name", ["claude", "codex", "gemini", "shell"])
+    def test_launch_registers_providers_for_fresh_process(
+        self, tmp_path: Path, monkeypatch, provider_name: str
+    ) -> None:
+        import ccgram.providers as providers_module
+        from ccgram.providers.registry import registry
+
+        runner = CliRunner()
+        create_window = AsyncMock(
+            return_value=(True, "Created window", "example", "@12")
+        )
+        stamp_pane_title = AsyncMock()
+
+        providers_snapshot = dict(registry._providers)
+        instances_snapshot = dict(registry._instances)
+        registered_snapshot = providers_module._registered
+        registry._providers.clear()
+        registry._instances.clear()
+        providers_module._registered = False
+
+        monkeypatch.setattr(SessionManager, "_load_state", lambda self: None)
+        monkeypatch.setattr(SessionManager, "_save_state", lambda self: None)
+        session_manager = SessionManager()
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.tmux_manager.create_window", create_window
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.tmux_manager.stamp_pane_title", stamp_pane_title
+        )
+        monkeypatch.setattr("ccgram.notify_cmd.session_manager", session_manager)
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.resolve_notify_launch_command",
+            lambda provider: f"/usr/bin/{provider}",
+        )
+
+        try:
+            result = runner.invoke(
+                cli,
+                [
+                    "notify",
+                    "launch",
+                    "--provider",
+                    provider_name,
+                    "--cwd",
+                    str(tmp_path),
+                ],
+            )
+        finally:
+            registry._providers.clear()
+            registry._providers.update(providers_snapshot)
+            registry._instances.clear()
+            registry._instances.update(instances_snapshot)
+            providers_module._registered = registered_snapshot
+
+        assert result.exit_code == 0
+        assert session_manager.get_window_state("@12").provider_name == provider_name
+        assert session_manager.get_notification_mode("@12") == "notify"
+        stamp_pane_title.assert_awaited_once_with("@12", provider_name)
 
     def test_attach_uses_interactive_tmux_calls(self, monkeypatch) -> None:
         calls = []
