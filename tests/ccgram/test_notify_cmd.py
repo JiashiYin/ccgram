@@ -312,7 +312,10 @@ class TestNotifyInstall:
 
         snippet = snippet_path.read_text()
         assert 'ccgram notify launch --provider codex --mode notify -- "$@"' in snippet
-        assert 'ccgram notify launch --provider codex --mode interactive --attach -- "$@"' in snippet
+        assert (
+            'ccgram notify launch --provider codex --mode interactive --attach -- "$@"'
+            not in snippet
+        )
         assert "codex-direct" in snippet
 
         rc_text = (tmp_path / ".bashrc").read_text()

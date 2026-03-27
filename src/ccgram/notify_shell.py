@@ -262,9 +262,6 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
             f"function {provider}\n"
             f"    command ccgram notify launch --provider {provider} --mode notify -- $argv\n"
             "end\n\n"
-            f"function {provider}-interactive\n"
-            f"    command ccgram notify launch --provider {provider} --mode interactive --attach -- $argv\n"
-            "end\n\n"
             f"function {provider}-direct\n"
             f"    command {quoted_direct} $argv\n"
             "end\n"
@@ -272,9 +269,6 @@ def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
     return (
         f"{provider}() {{\n"
         f'  command ccgram notify launch --provider {provider} --mode notify -- "$@"\n'
-        "}\n\n"
-        f"{provider}-interactive() {{\n"
-        f'  command ccgram notify launch --provider {provider} --mode interactive --attach -- "$@"\n'
         "}\n\n"
         f"alias {provider}-direct={quoted_direct}\n"
     )

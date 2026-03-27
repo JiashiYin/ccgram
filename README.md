@@ -233,7 +233,7 @@ Telegram-created sessions stay `interactive`, so the user-opened topic remains f
 If you explicitly want the tmux-backed remote-terminal experience locally, use:
 
 ```bash
-codex-interactive
+ccgram notify launch --provider codex --mode interactive --attach
 ```
 
 ### Notify Management
