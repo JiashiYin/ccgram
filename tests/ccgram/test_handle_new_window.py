@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from telegram.error import RetryAfter, TelegramError
 
-from ccgram.bot import _handle_new_window
+from ccgram.bot import _adopt_unbound_windows, _handle_new_window
 from ccgram.session_monitor import NewWindowEvent
+from ccgram.session import AuditIssue, AuditResult
 
 
 @pytest.fixture(autouse=True)
@@ -174,6 +175,35 @@ class TestHandleNewWindowAlreadyBound:
         bot.create_forum_topic.assert_not_called()
 
 
+class TestAdoptUnboundWindows:
+    async def test_skips_duplicate_session_orphan(self) -> None:
+        bot = AsyncMock()
+        window = MagicMock()
+        window.window_id = "@12"
+        window.window_name = "helloworld-7"
+
+        with (
+            patch("ccgram.bot.tmux_manager") as mock_tmux,
+            patch("ccgram.bot.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.sync_command._adopt_orphaned_windows",
+                new_callable=AsyncMock,
+            ) as mock_adopt,
+        ):
+            mock_tmux.list_windows = AsyncMock(return_value=[window])
+            mock_sm.audit_state.return_value = AuditResult(
+                issues=[AuditIssue("orphaned_window", "@12 (helloworld-7)", fixable=True)],
+                total_bindings=1,
+                live_binding_count=1,
+            )
+            mock_sm.get_window_state.return_value = MagicMock(session_id="sid-shared")
+            mock_sm.find_users_for_session.return_value = [(100, "native:abc", 393)]
+
+            await _adopt_unbound_windows(bot)
+
+        mock_adopt.assert_not_awaited()
+
+
 class TestHandleNewWindowErrors:
     """Error handling during topic creation."""
 
@@ -305,6 +335,29 @@ class TestHandleNewWindowNotificationMode:
             await _handle_new_window(event, bot)
 
         mock_sm.set_notification_mode.assert_not_called()
+
+    async def test_shared_chat_marks_auto_created_topic_with_default_responder(self) -> None:
+        event = _make_event(session_id="sess-ext", window_name="ext", cwd="/tmp/ext")
+        bot = AsyncMock()
+        bot.username = "AlphaBot"
+        bot.create_forum_topic = AsyncMock(return_value=_make_topic(thread_id=42))
+
+        with (
+            patch("ccgram.bot.session_manager") as mock_sm,
+            patch("ccgram.bot.config") as mock_config,
+        ):
+            mock_sm.iter_thread_bindings.return_value = iter([])
+            mock_sm.get_notification_mode.return_value = "interactive"
+            mock_sm.resolve_chat_id.return_value = 12345
+            mock_config.group_id = -100500
+            mock_config.allowed_users = {12345}
+
+            await _handle_new_window(event, bot)
+
+        bot.create_forum_topic.assert_called_once_with(
+            chat_id=-100500,
+            name="ext [@AlphaBot]",
+        )
 
 
 class TestHandleNewWindowGroupChatIdsFallback:

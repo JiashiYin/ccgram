@@ -35,8 +35,7 @@ Used for unattended or shell-started sessions:
 
 - surface blocking prompts that need action
 - surface dead/failure notices
-- surface explicit `[CCGRAM_MILESTONE]` summaries
-- surface explicit `[CCGRAM_FINAL]` summaries
+- surface ordinary report-backs once the session halts and is waiting for the user
 - suppress routine chatter
 
 ## Session Origins
@@ -72,15 +71,9 @@ Implementation:
 ## Notify Contract
 
 Blocking delivery is driven by provider parsers exposing `is_interactive=True`.
-
-Explicit summaries must use these markers:
-
-```text
-[CCGRAM_MILESTONE] ...
-[CCGRAM_FINAL] ...
-```
-
-The bridge strips the marker before Telegram delivery.
+Report-back delivery is driven by session state: when the agent emits a final
+reply and transitions to idle, that reply is forwarded automatically without
+special tokens.
 
 ## CLI Surface
 
@@ -123,7 +116,7 @@ The shipped README must explain:
 - `ccgram notify install / status / disable / uninstall`
 - default notify behavior for plain `codex`
 - Telegram-opened sessions staying interactive
-- milestone/final summary markers
+- halt-triggered report-back delivery without special markers
 
 ## Verification
 

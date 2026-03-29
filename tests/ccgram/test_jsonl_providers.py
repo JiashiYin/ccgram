@@ -98,6 +98,10 @@ class TestCodexLaunchArgs:
         result = codex.make_launch_args(use_continue=True)
         assert result == "resume --last"
 
+    def test_codex_supports_semantic_notify(self) -> None:
+        codex = CodexProvider()
+        assert codex.capabilities.supports_semantic_notify is True
+
 
 # ── Gemini-specific ──────────────────────────────────────────────────────
 
@@ -130,6 +134,7 @@ class TestCodexTranscriptParsing:
                 "type": "response_item",
                 "payload": {
                     "type": "message",
+                    "phase": "final_answer",
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": "hello"}],
                 },
@@ -139,6 +144,8 @@ class TestCodexTranscriptParsing:
         assert len(messages) == 1
         assert messages[0].text == "hello"
         assert messages[0].role == "assistant"
+        assert messages[0].phase == "final_answer"
+        assert messages[0].notify_kind == "report_back"
 
     def test_parses_user_input_item(self) -> None:
         codex = CodexProvider()
@@ -160,6 +167,7 @@ class TestCodexTranscriptParsing:
                 "type": "event_msg",
                 "payload": {
                     "type": "agent_message",
+                    "phase": "commentary",
                     "message": "working on it",
                 },
             }
@@ -169,6 +177,34 @@ class TestCodexTranscriptParsing:
         assert messages[0].text == "working on it"
         assert messages[0].role == "assistant"
         assert messages[0].content_type == "text"
+        assert messages[0].phase == "commentary"
+        assert messages[0].notify_kind == "commentary"
+
+    def test_task_complete_promotes_last_assistant_message_to_report_back(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "phase": "commentary",
+                    "message": "Need your approval on the architecture choice.",
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "last_agent_message": "Need your approval on the architecture choice.",
+                },
+            },
+        ]
+
+        messages, _ = codex.parse_transcript_entries(entries, {})
+
+        assert len(messages) == 1
+        assert messages[0].text == "Need your approval on the architecture choice."
+        assert messages[0].notify_kind == "report_back"
 
     def test_dedupes_identical_event_and_response_messages(self) -> None:
         codex = CodexProvider()

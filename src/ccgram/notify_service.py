@@ -47,7 +47,7 @@ def _load_state() -> dict[str, object]:
         return {}
     try:
         raw = json.loads(path.read_text())
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):
         return {}
     return raw if isinstance(raw, dict) else {}
 

@@ -120,7 +120,7 @@ async def get_foreground_args(tty_path: str) -> tuple[str, int]:
         )
         async with asyncio.timeout(3.0):
             stdout, _ = await proc.communicate()
-    except TimeoutError, OSError:
+    except (TimeoutError, OSError):
         return "", 0
 
     if proc.returncode != 0 or not stdout:

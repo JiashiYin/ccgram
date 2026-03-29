@@ -199,6 +199,52 @@ class TestPerWindowProviderResolution:
         assert len(new_messages) == 1
         assert new_messages[0].text == "hello codex"
 
+    async def test_process_session_file_preserves_message_phase(self, tmp_path) -> None:
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text("{}\n")
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        tracked = TrackedSession(
+            session_id="sess-phase",
+            file_path=str(session_file),
+            last_byte_offset=0,
+        )
+        monitor.state.update_session(tracked)
+
+        new_messages = []
+        with (
+            patch(
+                "ccgram.session_monitor.get_provider_for_window",
+                return_value=CodexProvider(),
+            ),
+            patch.object(
+                monitor,
+                "_read_new_lines",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "phase": "final_answer",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        },
+                    }
+                ],
+            ),
+        ):
+            await monitor._process_session_file(
+                "sess-phase", session_file, new_messages, window_id="@42"
+            )
+
+        assert len(new_messages) == 1
+        assert new_messages[0].phase == "final_answer"
+        assert new_messages[0].notify_kind == "report_back"
+
     async def test_check_for_updates_maps_session_to_window(self, tmp_path) -> None:
         """check_for_updates passes correct window_id to _process_session_file."""
         session_file = tmp_path / "transcript.jsonl"

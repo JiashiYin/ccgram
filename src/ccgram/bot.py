@@ -132,6 +132,11 @@ from .handlers.window_callbacks import handle_window_callback
 from .handlers.directory_browser import clear_browse_state
 from .handlers.cleanup import clear_topic_state
 from .handlers.topic_emoji import strip_emoji_prefix, update_stored_topic_name
+from .handlers.topic_routing import (
+    classify_topic_routing,
+    format_topic_name_with_default_responder,
+    leading_command_target,
+)
 from .handlers.history import send_history
 from .handlers.sessions_dashboard import (
     handle_sessions_kill,
@@ -148,8 +153,6 @@ from .handlers.upgrade import upgrade_command
 from .handlers.interactive_ui import (
     INTERACTIVE_TOOL_NAMES,
     clear_interactive_mode,
-    clear_interactive_msg,
-    get_interactive_msg_id,
     handle_interactive_ui,
     set_interactive_mode,
 )
@@ -161,11 +164,15 @@ from .handlers.message_queue import (
 )
 from .handlers.message_sender import safe_reply
 from .handlers.response_builder import build_response_parts
-from .handlers.status_polling import status_poll_loop
+from .handlers.status_polling import (
+    clear_pending_notify_report,
+    stage_pending_notify_report,
+    status_poll_loop,
+)
 from .handlers.file_handler import handle_document_message, handle_photo_message
 from .handlers.voice_handler import handle_voice_message
 from .handlers.text_handler import handle_text_message
-from .session import session_manager
+from .session import AuditIssue, session_manager
 from .session_monitor import NewMessage, NewWindowEvent, SessionMonitor
 from .telegram_request import ResilientPollingHTTPXRequest
 from .tmux_manager import tmux_manager
@@ -179,8 +186,6 @@ _CommandRefreshError = (TelegramError, OSError)
 _ERROR_KEYWORDS_RE = re.compile(
     r"\b(?:error|exception|failed|traceback|stderr|assertion)\b", re.IGNORECASE
 )
-
-_NOTIFY_SUMMARY_MARKERS = ("[CCGRAM_MILESTONE]", "[CCGRAM_FINAL]")
 
 # Max label length for /recall command buttons (wider than status bar buttons)
 _RECALL_LABEL_MAX = 40
@@ -219,12 +224,204 @@ def is_user_allowed(user_id: int | None) -> bool:
     return user_id is not None and config.is_user_allowed(user_id)
 
 
+def _handle_notify_mode_routing(
+    *,
+    msg: NewMessage,
+    user_id: int,
+    thread_id: int,
+    is_interactive_tool: bool,
+    is_tool_flow: bool,
+) -> bool:
+    """Route notify-mode messages.
+
+    Returns True when the caller should stop further processing for this message.
+    """
+    if msg.role == "user":
+        clear_pending_notify_report(user_id, thread_id)
+        return True
+    if is_interactive_tool:
+        clear_pending_notify_report(user_id, thread_id)
+        return False
+    if is_tool_flow:
+        clear_pending_notify_report(user_id, thread_id)
+        return True
+
+    is_complete_assistant_text = (
+        msg.is_complete and msg.role == "assistant" and (msg.text or "").strip()
+    )
+    if not is_complete_assistant_text:
+        clear_pending_notify_report(user_id, thread_id)
+        return True
+
+    if msg.notify_kind != "report_back":
+        clear_pending_notify_report(user_id, thread_id)
+        return True
+
+    stage_pending_notify_report(
+        user_id,
+        thread_id,
+        text=msg.text,
+        content_type=msg.content_type,
+        role=msg.role,
+    )
+    return True
+
+
 def _normalize_slash_token(command: str) -> str:
     parts = command.strip().split(None, 1)
     if not parts:
         return "/"
     token = parts[0].lower()
     return token if token.startswith("/") else f"/{token}"
+
+
+def _resolve_targeted_command_text(message: Message) -> str | None:
+    """Return command text for this bot, or None when targeted elsewhere."""
+    cmd_text = message.text or ""
+    parts = cmd_text.split(None, 1)
+    if not parts:
+        return cmd_text
+
+    command_word = parts[0]
+    if "@" not in command_word:
+        return cmd_text
+
+    base, _, target = command_word.partition("@")
+    bot_username = getattr(message.get_bot(), "username", None)
+    if target and bot_username and target.casefold() != bot_username.casefold():
+        return None
+
+    if len(parts) > 1:
+        return f"{base} {parts[1]}"
+    return base
+
+
+async def _claim_command_topic_default_responder(
+    message: Message,
+    *,
+    thread_id: int,
+    window_id: str,
+    bot_username: str,
+) -> None:
+    """Persist this bot as the topic default responder via the visible topic name."""
+    display_name = session_manager.get_display_name(window_id)
+    new_clean_name = format_topic_name_with_default_responder(display_name, bot_username)
+    if new_clean_name == display_name:
+        return
+
+    chat_id = message.chat.id
+    try:
+        await message.get_bot().edit_forum_topic(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            name=new_clean_name,
+        )
+    except TelegramError:
+        logger.exception(
+            "Failed to claim topic default responder for thread %s as %s",
+            thread_id,
+            bot_username,
+        )
+        return
+
+    session_manager.set_display_name(window_id, new_clean_name)
+    update_stored_topic_name(chat_id, thread_id, new_clean_name)
+    logger.info(
+        "Claimed topic default responder for thread %s as %s",
+        thread_id,
+        bot_username,
+    )
+
+
+async def _gate_command_topic_targeting(
+    message: Message,
+    *,
+    window_id: str,
+) -> tuple[bool, str | None, bool]:
+    """Apply shared-topic routing rules before forwarding a slash command."""
+    explicit_target = leading_command_target(message.text or "")
+    bot_username = getattr(message.get_bot(), "username", None)
+    display_name = session_manager.get_display_name(window_id)
+    decision, claim_default = await classify_topic_routing(
+        bot=message.get_bot(),
+        chat_id=message.chat.id,
+        display_name=display_name,
+        bot_username=bot_username,
+        explicit_self_target=explicit_target is not None,
+    )
+    if decision == "ignore":
+        return True, bot_username, False
+    if decision == "prompt":
+        await safe_reply(
+            message,
+            "Multiple bots are available in this topic. Start by addressing one explicitly, "
+            f"for example `@{bot_username} /status`. Once a bot is addressed explicitly, this "
+            "topic will remember it as the default responder.",
+        )
+        return True, bot_username, False
+    return False, bot_username, claim_default
+
+
+async def _handle_forwarded_command_success(
+    *,
+    update: Update,
+    user_id: int,
+    thread_id: int | None,
+    window_id: str,
+    display: str,
+    cc_slash: str,
+    provider: AgentProvider,
+    status_probe_offset: int | None,
+    probe_transcript_path: str | None,
+    probe_transcript_offset: int | None,
+    probe_pane_before: str | None,
+    bot_username: str | None,
+    claim_default: bool,
+) -> None:
+    """Apply success-path side effects after forwarding a provider command."""
+    if thread_id is not None:
+        from .handlers.command_history import record_command
+
+        record_command(user_id, thread_id, cc_slash)
+    await safe_reply(update.message, f"\u26a1 [{display}] Sent: {cc_slash}")
+    await _maybe_send_codex_status_snapshot(
+        update.message,
+        window_id,
+        display,
+        cc_slash,
+        since_offset=status_probe_offset,
+    )
+    _spawn_command_failure_probe(
+        update.message,
+        window_id,
+        display,
+        cc_slash,
+        provider=provider,
+        transcript_path=probe_transcript_path,
+        since_offset=probe_transcript_offset,
+        pane_before=probe_pane_before,
+    )
+    if claim_default and bot_username and thread_id is not None:
+        await _claim_command_topic_default_responder(
+            update.message,
+            thread_id=thread_id,
+            window_id=window_id,
+            bot_username=bot_username,
+        )
+    if cc_slash.strip().lower() == "/clear":
+        logger.info("Clearing session for window %s after /clear", display)
+        session_manager.clear_window_session(window_id)
+        from .handlers.message_queue import enqueue_status_update
+        from .handlers.status_polling import (
+            clear_screen_buffer,
+            clear_seen_status,
+        )
+
+        await enqueue_status_update(
+            update.get_bot(), user_id, window_id, None, thread_id=thread_id
+        )
+        clear_seen_status(window_id)
+        clear_screen_buffer(window_id)
 
 
 def _extract_probe_error_line(text: str) -> str | None:
@@ -266,14 +463,6 @@ def _short_supported_commands(supported_commands: set[str], limit: int = 8) -> s
     shown = supported[:limit]
     suffix = "" if len(supported) <= limit else " …"
     return "Try: " + ", ".join(shown) + suffix
-
-
-def _extract_notify_summary(text: str) -> tuple[bool, str]:
-    """Return stripped text when a notify summary marker is present."""
-    for marker in _NOTIFY_SUMMARY_MARKERS:
-        if text.startswith(marker):
-            return True, text[len(marker) :].strip()
-    return False, text
 
 
 def _set_bounded_cache_entry[K, V](
@@ -657,7 +846,10 @@ async def forward_command_handler(
     if chat.type in ("group", "supergroup") and thread_id is not None:
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
 
-    cmd_text = update.message.text or ""
+    cmd_text = _resolve_targeted_command_text(update.message)
+    if cmd_text is None:
+        logger.debug("Ignoring slash command addressed to another bot")
+        return
     # Split into command word + arguments, then strip @botname from command
     parts = cmd_text.split(None, 1)  # ["/cmd@botname", "optional args"]
     raw_cmd = parts[0].split("@")[0] if parts else ""  # strip @botname
@@ -675,6 +867,13 @@ async def forward_command_handler(
         return
 
     display = session_manager.get_display_name(window_id)
+    handled, bot_username, claim_default = await _gate_command_topic_targeting(
+        update.message,
+        window_id=window_id,
+    )
+    if handled:
+        return
+
     provider = get_provider_for_window(window_id)
     await _sync_scoped_provider_menu(update.message, user.id, provider)
     provider_map, current_supported = _get_provider_command_metadata(provider)
@@ -718,44 +917,21 @@ async def forward_command_handler(
     status_probe_offset = _codex_status_probe_offset(window_id, cc_slash)
     success, message = await session_manager.send_to_window(window_id, cc_slash)
     if success:
-        if thread_id is not None:
-            from .handlers.command_history import record_command
-
-            record_command(user.id, thread_id, cc_slash)
-        await safe_reply(update.message, f"\u26a1 [{display}] Sent: {cc_slash}")
-        await _maybe_send_codex_status_snapshot(
-            update.message,
-            window_id,
-            display,
-            cc_slash,
-            since_offset=status_probe_offset,
-        )
-        _spawn_command_failure_probe(
-            update.message,
-            window_id,
-            display,
-            cc_slash,
+        await _handle_forwarded_command_success(
+            update=update,
+            user_id=user.id,
+            thread_id=thread_id,
+            window_id=window_id,
+            display=display,
+            cc_slash=cc_slash,
             provider=provider,
-            transcript_path=probe_transcript_path,
-            since_offset=probe_transcript_offset,
-            pane_before=probe_pane_before,
+            status_probe_offset=status_probe_offset,
+            probe_transcript_path=probe_transcript_path,
+            probe_transcript_offset=probe_transcript_offset,
+            probe_pane_before=probe_pane_before,
+            bot_username=bot_username,
+            claim_default=claim_default,
         )
-        # If /clear command was sent, clear the session association
-        # so we can detect the new session after first message
-        if cc_slash.strip().lower() == "/clear":
-            logger.info("Clearing session for window %s after /clear", display)
-            session_manager.clear_window_session(window_id)
-            from .handlers.message_queue import enqueue_status_update
-            from .handlers.status_polling import (
-                clear_screen_buffer,
-                clear_seen_status,
-            )
-
-            await enqueue_status_update(
-                update.get_bot(), user.id, window_id, None, thread_id=thread_id
-            )
-            clear_seen_status(window_id)
-            clear_screen_buffer(window_id)
     else:
         await safe_reply(update.message, f"\u274c {message}")
 
@@ -838,7 +1014,7 @@ async def _probe_transcript_command_error(
                 transcript_path,
                 since_offset,
             )
-    except OSError, NotImplementedError:
+    except (OSError, NotImplementedError):
         return None
 
     messages, _ = provider.parse_transcript_entries(entries, pending_tools={})
@@ -1439,22 +1615,18 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
             "tool_use",
             "tool_result",
         )
-        is_notify_summary = False
-        summary_text = msg.text
-        if msg.role == "assistant" and msg.text:
-            is_notify_summary, summary_text = _extract_notify_summary(msg.text)
-        if not is_interactive_tool and get_interactive_msg_id(user_id, thread_id):
-            await clear_interactive_msg(user_id, bot, thread_id)
         if notif_mode == "muted":
             if not is_tool_flow:
                 continue
         elif notif_mode == "errors_only":
             if not is_tool_flow and not _ERROR_KEYWORDS_RE.search(msg.text or ""):
                 continue
-        elif (
-            notif_mode == "notify"
-            and not is_interactive_tool
-            and not (is_notify_summary and summary_text)
+        elif notif_mode == "notify" and _handle_notify_mode_routing(
+            msg=msg,
+            user_id=user_id,
+            thread_id=thread_id,
+            is_interactive_tool=is_interactive_tool,
+            is_tool_flow=is_tool_flow,
         ):
             continue
 
@@ -1486,7 +1658,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 clear_interactive_mode(user_id, thread_id)
 
         parts = build_response_parts(
-            summary_text,
+            msg.text,
             msg.is_complete,
             msg.content_type,
             msg.role,
@@ -1503,7 +1675,7 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
                 parts=parts,
                 tool_use_id=msg.tool_use_id,
                 content_type=msg.content_type,
-                text=summary_text,
+                text=msg.text,
                 thread_id=thread_id,
             )
 
@@ -1521,6 +1693,14 @@ async def handle_new_message(msg: NewMessage, bot: Bot) -> None:
 
 
 # --- Auto-create topic for new tmux windows ---
+
+
+async def _topic_name_for_chat(bot: Bot, *, topic_name: str) -> str:
+    """Return the topic name to create for a specific chat."""
+    bot_username = getattr(bot, "username", None)
+    if not bot_username:
+        return topic_name
+    return format_topic_name_with_default_responder(topic_name, bot_username)
 
 
 async def _handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
@@ -1612,11 +1792,12 @@ async def _handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
             continue
 
         try:
-            topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name)
+            topic_name_for_chat = await _topic_name_for_chat(bot, topic_name=topic_name)
+            topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name_for_chat)
             _topic_create_retry_until.pop(chat_id, None)
             logger.info(
                 "Auto-created topic '%s' (thread=%d) in chat %d for window %s",
-                topic_name,
+                topic_name_for_chat,
                 topic.message_thread_id,
                 chat_id,
                 event.window_id,
@@ -1630,7 +1811,7 @@ async def _handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
                         user_id,
                         topic.message_thread_id,
                         event.window_id,
-                        window_name=topic_name,
+                        window_name=topic_name_for_chat,
                     )
                     session_manager.set_group_chat_id(
                         user_id, topic.message_thread_id, chat_id
@@ -1643,7 +1824,7 @@ async def _handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
                     first_user_id,
                     topic.message_thread_id,
                     event.window_id,
-                    window_name=topic_name,
+                    window_name=topic_name_for_chat,
                 )
                 session_manager.set_group_chat_id(
                     first_user_id, topic.message_thread_id, chat_id
@@ -1687,7 +1868,25 @@ async def _adopt_unbound_windows(bot: Bot) -> None:
     live_ids = {w.window_id for w in all_windows}
     live_pairs = [(w.window_id, w.window_name) for w in all_windows]
     audit = session_manager.audit_state(live_ids, live_pairs)
-    orphaned = [i for i in audit.issues if i.category == "orphaned_window"]
+    orphaned: list[AuditIssue] = []
+    for issue in audit.issues:
+        if issue.category != "orphaned_window":
+            continue
+        match = re.search(r"(@\d+|native:[^ )]+|emdash-[^ )]+:\@\d+)", issue.detail)
+        if not match:
+            orphaned.append(issue)
+            continue
+        window_id = match.group(1)
+        window_state = session_manager.get_window_state(window_id)
+        session_id = getattr(window_state, "session_id", "")
+        if session_id and session_manager.find_users_for_session(session_id):
+            logger.info(
+                "Startup: skipping orphaned window %s because session %s is already bound",
+                window_id,
+                session_id,
+            )
+            continue
+        orphaned.append(issue)
     if orphaned:
         from .handlers.sync_command import _adopt_orphaned_windows
 

@@ -149,9 +149,67 @@ class TestFindUsersForSession:
         assert len(result) == 2
         assert {r[0] for r in result} == {100, 200}
 
+    def test_prefers_native_binding_when_same_user_has_duplicate_session(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 316, "@12")
+        mgr.bind_thread(100, 393, "native:abc")
+        mgr.window_states["@12"] = self._ws("sid-shared")
+        mgr.window_states["native:abc"] = self._ws("sid-shared")
+        mgr.set_notification_mode("@12", "notify")
+        mgr.set_notification_mode("native:abc", "notify")
+
+        result = mgr.find_users_for_session("sid-shared")
+
+        assert result == [(100, "native:abc", 393)]
+
+    def test_prefers_newer_thread_for_duplicate_non_native_notify_bindings(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 11, "@1")
+        mgr.bind_thread(100, 42, "@2")
+        mgr.window_states["@1"] = self._ws("sid-shared")
+        mgr.window_states["@2"] = self._ws("sid-shared")
+        mgr.set_notification_mode("@1", "notify")
+        mgr.set_notification_mode("@2", "notify")
+
+        result = mgr.find_users_for_session("sid-shared")
+
+        assert result == [(100, "@2", 42)]
+
     def test_ignores_windows_without_state(self, mgr: SessionManager) -> None:
         mgr.bind_thread(100, 1, "@1")
         assert mgr.find_users_for_session("sid-1") == []
+
+
+class TestFindRedundantNotifySessionBindings:
+    @staticmethod
+    def _ws(session_id: str) -> WindowState:
+        return WindowState(session_id=session_id, cwd="/tmp")
+
+    def test_returns_older_notify_binding_for_same_session(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.bind_thread(100, 316, "@12")
+        mgr.bind_thread(100, 393, "native:abc")
+        mgr.window_states["@12"] = self._ws("sid-shared")
+        mgr.window_states["native:abc"] = self._ws("sid-shared")
+        mgr.set_notification_mode("@12", "notify")
+        mgr.set_notification_mode("native:abc", "notify")
+
+        redundant = mgr.find_redundant_notify_session_bindings()
+
+        assert redundant == [(100, 316, "@12")]
+
+    def test_keeps_interactive_duplicate_binding(self, mgr: SessionManager) -> None:
+        mgr.bind_thread(100, 11, "@1")
+        mgr.bind_thread(100, 42, "@2")
+        mgr.window_states["@1"] = self._ws("sid-shared")
+        mgr.window_states["@2"] = self._ws("sid-shared")
+        mgr.set_notification_mode("@1", "interactive")
+        mgr.set_notification_mode("@2", "interactive")
+
+        assert mgr.find_redundant_notify_session_bindings() == []
 
 
 class TestLoadSessionMapDisplayName:
@@ -239,6 +297,24 @@ class TestParseSessionMap:
         raw = {"ccgram:win-a": {"session_id": "s1", "cwd": "/home/user/proj"}}
         result = parse_session_map(raw, "ccgram:")
         assert result["win-a"]["cwd"] == "/home/user/proj"
+
+    def test_accepts_native_window_keys(self) -> None:
+        from ccgram.session import parse_session_map
+
+        raw = {
+            "native:abc123": {
+                "session_id": "s1",
+                "cwd": "/home/user/proj",
+                "transcript_path": "/tmp/session.jsonl",
+                "provider_name": "codex",
+            }
+        }
+
+        result = parse_session_map(raw, "ccgram:")
+
+        assert result["native:abc123"]["cwd"] == "/home/user/proj"
+        assert result["native:abc123"]["transcript_path"] == "/tmp/session.jsonl"
+        assert result["native:abc123"]["provider_name"] == "codex"
 
     @pytest.mark.parametrize(
         "bad_value",
@@ -989,6 +1065,49 @@ class TestPruneStaleWindowStates:
     def test_noop_when_nothing_stale(self, mgr: SessionManager) -> None:
         changed = mgr.prune_stale_window_states(live_window_ids=set())
         assert not changed
+
+
+class TestPurgeDeadWindowState:
+    @pytest.fixture(autouse=True)
+    def _empty_session_map(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "ccgram.session.config.session_map_file", tmp_path / "session-map.json"
+        )
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+    def test_removes_window_refs_and_session_map(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map = tmp_path / "session-map.json"
+        session_map.write_text(
+            json.dumps(
+                {
+                    "ccgram:@9": {
+                        "session_id": "sess-9",
+                        "cwd": "/tmp/project",
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map)
+
+        mgr.window_states["@9"] = WindowState(session_id="sess-9", cwd="/tmp/project")
+        mgr.window_display_names["@9"] = "project"
+        mgr.user_window_offsets[100] = {"@9": 10, "@1": 20}
+
+        changed = mgr.purge_dead_window_state("@9")
+
+        assert changed is True
+        assert "@9" not in mgr.window_states
+        assert "@9" not in mgr.window_display_names
+        assert mgr.user_window_offsets[100] == {"@1": 20}
+        assert json.loads(session_map.read_text()) == {}
+
+    def test_removes_native_registry_entry(self, mgr: SessionManager) -> None:
+        with patch("ccgram.native_sessions.remove_native_session") as mock_remove:
+            mgr.purge_dead_window_state("native:dead1")
+
+        mock_remove.assert_called_once_with("native:dead1")
 
 
 class TestPruneStaleStateSkipChatIds:

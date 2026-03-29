@@ -20,14 +20,14 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.error import BadRequest, TelegramError
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from ..config import config
 from ..session import AuditIssue, AuditResult, session_manager
 from ..tmux_manager import tmux_manager
 from .callback_data import CB_SYNC_DISMISS, CB_SYNC_FIX
-from .cleanup import clear_topic_state
+from .cleanup import clear_topic_state, remove_topic
 from .message_sender import safe_edit, safe_reply
 
 logger = structlog.get_logger()
@@ -127,33 +127,6 @@ def _format_report(
     return text, keyboard
 
 
-def _is_topic_gone(exc: BadRequest) -> bool:
-    """Check if a BadRequest means the topic no longer exists."""
-    msg = exc.message.lower()
-    return "thread not found" in msg or "topic_id_invalid" in msg
-
-
-async def _remove_topic(bot: Bot, chat_id: int, thread_id: int) -> bool:
-    """Try to delete a topic, fall back to close. Returns True on success.
-
-    Only "topic not found" BadRequest is treated as success; other BadRequest
-    errors (e.g. insufficient rights) fall through to the close fallback.
-    """
-    try:
-        await bot.delete_forum_topic(chat_id, thread_id)
-        return True
-    except BadRequest as e:
-        if _is_topic_gone(e):
-            return True
-    except TelegramError:
-        pass
-    try:
-        await bot.close_forum_topic(chat_id, thread_id)
-        return True
-    except TelegramError:
-        return False
-
-
 async def _close_ghost_topics(bot: Bot, issues: list[AuditIssue]) -> int:
     """Delete (or close) Telegram topics for ghost bindings.
 
@@ -180,7 +153,7 @@ async def _close_ghost_topics(bot: Bot, issues: list[AuditIssue]) -> int:
                 thread_id,
             )
         else:
-            topic_removed = await _remove_topic(bot, chat_id, thread_id)
+            topic_removed = await remove_topic(bot, chat_id, thread_id)
             if not topic_removed:
                 logger.warning(
                     "Failed to delete/close ghost topic thread=%d window=%s",
@@ -195,7 +168,7 @@ async def _close_ghost_topics(bot: Bot, issues: list[AuditIssue]) -> int:
                 session_manager.unbind_thread(user_id, thread_id)
                 if topic_removed:
                     closed_count += 1
-            except OSError, TelegramError:
+            except (OSError, TelegramError):
                 logger.exception(
                     "Failed to clean up ghost binding thread=%d window=%s",
                     thread_id,

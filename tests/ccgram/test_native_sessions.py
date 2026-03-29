@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-import socket
-import threading
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from ccgram.native_sessions import (
     NATIVE_WINDOW_PREFIX,
@@ -38,7 +37,11 @@ def test_list_native_windows_includes_running_session(tmp_path: Path, monkeypatc
         pid=1234,
     )
 
-    windows = list_native_windows()
+    with (
+        patch("ccgram.native_sessions._pid_is_running", return_value=True),
+        patch("ccgram.native_sessions._has_live_control_channel", return_value=True),
+    ):
+        windows = list_native_windows()
 
     assert len(windows) == 1
     window = windows[0]
@@ -106,25 +109,19 @@ def test_send_native_keys_writes_json_command_to_socket(
         pid=999,
     )
 
-    received: dict[str, object] = {}
+    client = MagicMock()
+    socket_cm = MagicMock()
+    socket_cm.__enter__.return_value = client
 
-    def _server() -> None:
-        control_path.parent.mkdir(parents=True, exist_ok=True)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-            server.bind(str(control_path))
-            server.listen(1)
-            conn, _ = server.accept()
-            with conn:
-                payload = conn.recv(4096)
-        received.update(json.loads(payload.decode("utf-8")))
+    with patch("ccgram.native_sessions.socket.socket", return_value=socket_cm):
+        assert send_native_keys(window_id, "Enter", enter=False, literal=False) is True
 
-    thread = threading.Thread(target=_server, daemon=True)
-    thread.start()
-
-    assert send_native_keys(window_id, "Enter", enter=False, literal=False) is True
-    thread.join(timeout=3)
-
-    assert received == {"chars": "Enter", "enter": False, "literal": False}
+    client.connect.assert_called_once_with(str(control_path))
+    client.sendall.assert_called_once_with(
+        json.dumps(
+            {"chars": "Enter", "enter": False, "literal": False}
+        ).encode("utf-8")
+    )
 
 
 def test_list_native_windows_hides_old_exited_sessions(
@@ -151,3 +148,205 @@ def test_list_native_windows_hides_old_exited_sessions(
     mark_native_session_exited(window_id, exit_code=0, ended_at=0.0)
 
     assert list_native_windows(now=600.0) == []
+
+
+def test_list_native_windows_hides_recent_exited_sessions_from_live_view(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}done-now"
+    snapshot_path = tmp_path / "native" / "done-now" / "snapshot.json"
+    control_path = tmp_path / "native" / "done-now" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=100,
+        rows=30,
+        pid=999,
+    )
+    mark_native_session_exited(window_id, exit_code=0, ended_at=10.0)
+
+    assert list_native_windows(now=11.0) == []
+
+
+def test_list_native_windows_marks_missing_pid_exited(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}gone1"
+    snapshot_path = tmp_path / "native" / "gone1" / "snapshot.json"
+    control_path = tmp_path / "native" / "gone1" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=100,
+        rows=30,
+        pid=999,
+    )
+
+    with patch("ccgram.native_sessions.os.kill", side_effect=OSError):
+        assert list_native_windows(now=50.0) == []
+
+    registry = json.loads((tmp_path / "native-sessions.json").read_text())
+    record = registry["sessions"][window_id]
+    assert record["running"] is False
+    assert record["ended_at"] == 50.0
+
+
+def test_list_native_windows_marks_missing_control_socket_exited_after_grace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}gone-sock"
+    snapshot_path = tmp_path / "native" / "gone-sock" / "snapshot.json"
+    control_path = tmp_path / "native" / "gone-sock" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=100,
+        rows=30,
+        pid=999,
+    )
+    registry_path = tmp_path / "native-sessions.json"
+    registry = json.loads(registry_path.read_text())
+    registry["sessions"][window_id]["started_at"] = 0.0
+    registry_path.write_text(json.dumps(registry))
+
+    with patch("ccgram.native_sessions._pid_is_running", return_value=True):
+        assert list_native_windows(now=10.0) == []
+
+    registry = json.loads((tmp_path / "native-sessions.json").read_text())
+    record = registry["sessions"][window_id]
+    assert record["running"] is False
+    assert record["ended_at"] == 10.0
+
+
+def test_list_native_windows_keeps_recent_running_session_without_socket(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}startup-sock"
+    snapshot_path = tmp_path / "native" / "startup-sock" / "snapshot.json"
+    control_path = tmp_path / "native" / "startup-sock" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=100,
+        rows=30,
+        pid=999,
+    )
+    registry_path = tmp_path / "native-sessions.json"
+    registry = json.loads(registry_path.read_text())
+    registry["sessions"][window_id]["started_at"] = 0.0
+    registry_path.write_text(json.dumps(registry))
+
+    with patch("ccgram.native_sessions._pid_is_running", return_value=True):
+        windows = list_native_windows(now=1.0)
+
+    assert [window.window_id for window in windows] == [window_id]
+
+
+def test_list_native_windows_marks_stale_control_socket_exited(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}stale-sock"
+    snapshot_path = tmp_path / "native" / "stale-sock" / "snapshot.json"
+    control_path = tmp_path / "native" / "stale-sock" / "control.sock"
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    control_path.touch()
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=100,
+        rows=30,
+        pid=999,
+    )
+    registry_path = tmp_path / "native-sessions.json"
+    registry = json.loads(registry_path.read_text())
+    registry["sessions"][window_id]["started_at"] = 0.0
+    registry_path.write_text(json.dumps(registry))
+
+    with (
+        patch("ccgram.native_sessions._pid_is_running", return_value=True),
+        patch(
+            "ccgram.native_sessions._control_socket_accepts_connections",
+            return_value=False,
+        ),
+    ):
+        assert list_native_windows(now=10.0) == []
+
+    registry = json.loads((tmp_path / "native-sessions.json").read_text())
+    record = registry["sessions"][window_id]
+    assert record["running"] is False
+
+
+def test_list_native_windows_marks_missing_bridge_process_exited(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}bridge-gone"
+    snapshot_path = tmp_path / "native" / "bridge-gone" / "snapshot.json"
+    control_path = tmp_path / "native" / "bridge-gone" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=100,
+        rows=30,
+        pid=999,
+    )
+
+    def _pid_side_effect(pid: object) -> bool:
+        return pid == 999
+
+    with (
+        patch("ccgram.native_sessions._pid_is_running", side_effect=_pid_side_effect),
+        patch("ccgram.native_sessions._has_live_control_channel", return_value=True),
+    ):
+        assert list_native_windows(now=10.0) == []
+
+    registry = json.loads((tmp_path / "native-sessions.json").read_text())
+    record = registry["sessions"][window_id]
+    assert record["running"] is False

@@ -13,6 +13,7 @@ Modern Codex ``response_item`` payloads use typed shapes:
   - ``type=function_call_output`` with ``call_id``, ``output``
 """
 
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -55,6 +56,15 @@ _TOOL_NAME_ALIASES: dict[str, str] = {
 _TOOL_RESULT_QUOTE_THRESHOLD = 3
 
 
+def _notify_kind_from_phase(phase: Any) -> str | None:
+    """Map Codex transcript phases onto provider-agnostic notify semantics."""
+    if phase == "commentary":
+        return "commentary"
+    if phase == "final_answer":
+        return "report_back"
+    return None
+
+
 def _format_codex_tool_result(raw_tool_name: str, output_text: str) -> str:
     """Format a Codex tool result with stats summary and expandable quote.
 
@@ -72,7 +82,7 @@ def _format_codex_tool_result(raw_tool_name: str, output_text: str) -> str:
     if raw_tool_name == "apply_patch":
         try:
             parsed = json.loads(output_text)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             parsed = None
         if isinstance(parsed, dict):
             result_text = parsed.get("output", "") or parsed.get("result", "")
@@ -307,7 +317,7 @@ def _parse_custom_tool_call_output(
     if isinstance(raw_output, str):
         try:
             parsed = json.loads(raw_output)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             parsed = None
         if isinstance(parsed, dict) and "output" in parsed:
             output_text = str(parsed["output"]).strip()
@@ -421,12 +431,16 @@ def _parse_response_message(
     text = _extract_text_blocks(payload.get("content", ""))
     if not text:
         return [], pending
+    phase = payload.get("phase")
+    notify_kind = _notify_kind_from_phase(phase)
     return (
         [
             AgentMessage(
                 text=text,
                 role=cast(MessageRole, role),
                 content_type="text",
+                phase=phase if isinstance(phase, str) and phase else None,
+                notify_kind=notify_kind,
             )
         ],
         pending,
@@ -444,8 +458,18 @@ def _parse_event_message(
     text = payload.get("message", "")
     if not isinstance(text, str) or not text:
         return [], pending
+    phase = payload.get("phase")
+    notify_kind = _notify_kind_from_phase(phase)
     return (
-        [AgentMessage(text=text, role="assistant", content_type="text")],
+        [
+            AgentMessage(
+                text=text,
+                role="assistant",
+                content_type="text",
+                phase=phase if isinstance(phase, str) and phase else None,
+                notify_kind=notify_kind,
+            )
+        ],
         pending,
     )
 
@@ -477,6 +501,43 @@ def _append_unique_messages(
         dest.append(message)
         current = signature
     return current
+
+
+def _promote_task_complete_report_back(
+    dest: list[AgentMessage],
+    last_signature: tuple[str, str, str] | None,
+    payload: dict[str, Any],
+) -> tuple[str, str, str] | None:
+    """Treat Codex task_complete as a halt even when the last turn was commentary.
+
+    Codex emits ``task_complete`` with ``last_agent_message`` after the turn ends.
+    When the final assistant text was tagged as commentary, notify-mode still needs
+    to learn that the turn actually halted. Promote the most recent matching
+    assistant text message to ``report_back`` instead of appending a duplicate.
+    """
+    last_agent_message = payload.get("last_agent_message")
+    if not isinstance(last_agent_message, str) or not last_agent_message.strip():
+        return last_signature
+
+    for idx in range(len(dest) - 1, -1, -1):
+        message = dest[idx]
+        if (
+            message.role == "assistant"
+            and message.content_type == "text"
+            and message.text == last_agent_message
+        ):
+            if message.notify_kind != "report_back":
+                dest[idx] = replace(message, notify_kind="report_back")
+            return last_signature
+
+    promoted = AgentMessage(
+        text=last_agent_message,
+        role="assistant",
+        content_type="text",
+        phase="task_complete",
+        notify_kind="report_back",
+    )
+    return _append_unique_messages(dest, [promoted], last_signature)
 
 
 # Transcripts older than this are considered stale and skipped during discovery.
@@ -526,6 +587,7 @@ class CodexProvider(JsonlProvider):
         supports_continue=True,
         supports_structured_transcript=True,
         transcript_format="jsonl",
+        supports_semantic_notify=True,
         builtin_commands=tuple(_CODEX_BUILTINS.keys()),
         supports_user_command_discovery=True,
     )
@@ -577,6 +639,11 @@ class CodexProvider(JsonlProvider):
                 continue
 
             if entry_type == "event_msg":
+                if payload.get("type") == "task_complete":
+                    last_signature = _promote_task_complete_report_back(
+                        messages, last_signature, payload
+                    )
+                    continue
                 parsed, pending = _parse_event_message(payload, pending)
                 last_signature = _append_unique_messages(
                     messages, parsed, last_signature

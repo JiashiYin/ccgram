@@ -55,7 +55,7 @@ def _load_state() -> dict[str, object]:
         return {_STATE_PROVIDERS_KEY: {}}
     try:
         raw = json.loads(path.read_text())
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):
         return {_STATE_PROVIDERS_KEY: {}}
     if not isinstance(raw, dict):
         return {_STATE_PROVIDERS_KEY: {}}

@@ -10,6 +10,7 @@ from ccgram.handlers.text_handler import (
     _forward_message,
     _handle_dead_window,
     _handle_unbound_topic,
+    _resolve_targeted_text,
 )
 from ccgram.handlers.directory_browser import (
     STATE_BROWSING_DIRECTORY,
@@ -387,6 +388,30 @@ class TestShellProviderRouting:
             mock_shell.assert_not_called()
 
 
+class TestTargetedTextResolution:
+    def test_strips_leading_own_bot_mention(self) -> None:
+        message = MagicMock()
+        message.text = "@MyBot \nhello from telegram"
+        message.entities = [MagicMock(type="mention", offset=0, length=6)]
+        bot = MagicMock()
+        bot.username = "MyBot"
+        bot.id = 123
+        message.get_bot.return_value = bot
+
+        assert _resolve_targeted_text(message) == "hello from telegram"
+
+    def test_ignores_leading_other_bot_mention(self) -> None:
+        message = MagicMock()
+        message.text = "@OtherBot hello there"
+        message.entities = [MagicMock(type="mention", offset=0, length=9)]
+        bot = MagicMock()
+        bot.username = "MyBot"
+        bot.id = 123
+        message.get_bot.return_value = bot
+
+        assert _resolve_targeted_text(message) is None
+
+
 class TestForwardMessage:
     @patch(f"{_TH}.session_manager")
     async def test_sends_to_window(self, mock_sm: MagicMock) -> None:
@@ -474,6 +499,90 @@ class TestForwardMessage:
         await _forward_message("@0", 100, 42, "hello", bot, message)
 
         mock_handle_ui.assert_called_once_with(bot, 100, "@0", 42)
+
+
+class TestHandleTextMessageTargeting:
+    @patch(f"{_TH}.get_provider_for_window")
+    @patch(f"{_TH}._handle_dead_window", new_callable=AsyncMock, return_value=False)
+    @patch(f"{_TH}.session_manager")
+    async def test_ignores_text_addressed_to_other_bot(
+        self,
+        mock_sm: MagicMock,
+        _mock_dead: AsyncMock,
+        mock_get_provider: MagicMock,
+    ) -> None:
+        mock_sm.get_window_for_thread.return_value = "@0"
+        mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+        provider = MagicMock()
+        provider.capabilities.name = "codex"
+        mock_get_provider.return_value = provider
+
+        from ccgram.handlers.text_handler import handle_text_message
+
+        update = MagicMock()
+        context = MagicMock()
+        context.bot = AsyncMock()
+        context.user_data = {}
+        message = MagicMock()
+        message.chat = MagicMock()
+        message.chat.send_action = AsyncMock()
+        message.message_thread_id = 42
+        message.text = "@OtherBot hello"
+        message.entities = [MagicMock(type="mention", offset=0, length=9)]
+        message.chat.type = "supergroup"
+        bot = MagicMock()
+        bot.username = "MyBot"
+        bot.id = 123
+        message.get_bot.return_value = bot
+        update.message = message
+        update.effective_user = MagicMock()
+        update.effective_user.id = 100
+
+        await handle_text_message(update, context)
+
+        mock_sm.send_to_window.assert_not_called()
+
+    @patch(f"{_TH}.get_provider_for_window")
+    @patch(f"{_TH}._handle_dead_window", new_callable=AsyncMock, return_value=False)
+    @patch(f"{_TH}.session_manager")
+    async def test_strips_own_bot_mention_before_forwarding(
+        self,
+        mock_sm: MagicMock,
+        _mock_dead: AsyncMock,
+        mock_get_provider: MagicMock,
+    ) -> None:
+        mock_sm.get_window_for_thread.return_value = "@0"
+        mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+        provider = MagicMock()
+        provider.capabilities.name = "codex"
+        mock_get_provider.return_value = provider
+
+        from ccgram.handlers.text_handler import handle_text_message
+
+        update = MagicMock()
+        context = MagicMock()
+        context.bot = AsyncMock()
+        context.user_data = {}
+        message = MagicMock()
+        message.chat = MagicMock()
+        message.chat.send_action = AsyncMock()
+        message.message_thread_id = 42
+        message.text = "@MyBot \nhello"
+        message.entities = [MagicMock(type="mention", offset=0, length=6)]
+        message.chat.type = "supergroup"
+        bot = MagicMock()
+        bot.username = "MyBot"
+        bot.id = 123
+        message.get_bot.return_value = bot
+        update.message = message
+        update.effective_user = MagicMock()
+        update.effective_user.id = 100
+
+        await handle_text_message(update, context)
+
+        mock_sm.send_to_window.assert_called_once_with("@0", "hello")
 
 
 class TestBashCaptureCleanup:

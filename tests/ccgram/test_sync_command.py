@@ -266,7 +266,9 @@ class TestSyncFix:
             patch("ccgram.handlers.sync_command.clear_topic_state") as mock_cleanup,
         ):
             await handle_sync_fix(query)
-            mock_bot.delete_forum_topic.assert_called_once_with(-999, 42)
+            mock_bot.delete_forum_topic.assert_called_once_with(
+                chat_id=-999, message_thread_id=42
+            )
             mock_cleanup.assert_called_once_with(100, 42, bot=mock_bot, window_id="@7")
             mock_sm.unbind_thread.assert_called_once_with(100, 42)
             report_text = mock_edit.call_args[0][1]

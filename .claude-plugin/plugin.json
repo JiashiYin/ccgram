@@ -1,7 +1,7 @@
 {
   "name": "ccgram-notify",
   "version": "0.1.0",
-  "description": "Telegram notify and remote-control workflow for agent CLIs, with Codex-first setup.",
+  "description": "Codex-first Telegram notify and remote-control workflow built on the CCGram bridge.",
   "author": {
     "name": "CCGram Notify Contributors",
     "url": "https://github.com/alexei-led/ccgram"
@@ -17,9 +17,9 @@
     "agents"
   ],
   "interface": {
-    "displayName": "CCGram Notify",
-    "shortDescription": "Telegram notify and control for agent CLIs.",
-    "longDescription": "Adds interactive and notify session modes to CCGram, plus a Codex-first setup flow that routes normal codex launches into the monitored tmux workflow.",
+    "displayName": "CCGram Notify for Codex",
+    "shortDescription": "Telegram notify and control for Codex.",
+    "longDescription": "Adds a Codex-first notify workflow to the CCGram bridge: normal local codex launches stay native, interactive blockers reach Telegram, and Telegram-opened sessions remain fully interactive.",
     "developerName": "CCGram Notify Contributors",
     "category": "Developer Tools",
     "capabilities": [

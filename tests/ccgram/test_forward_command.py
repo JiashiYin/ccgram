@@ -33,7 +33,9 @@ def _make_update(
     msg.chat.id = -100999
     msg.chat.is_forum = True
     msg.is_topic_message = True
-    msg.get_bot = MagicMock(return_value=MagicMock(send_chat_action=AsyncMock()))
+    bot = MagicMock(send_chat_action=AsyncMock())
+    bot.username = "mybot"
+    msg.get_bot = MagicMock(return_value=bot)
     update.message = msg
     update.callback_query = None
     return update
@@ -182,6 +184,14 @@ class TestForwardCommandResolution:
         await forward_command_handler(update, _make_context())
 
         self.mock_sm.send_to_window.assert_called_once_with("@1", "/compact some args")
+
+    async def test_command_addressed_to_other_bot_is_ignored(self) -> None:
+        update = _make_update(text="/clear@otherbot")
+        update.message.get_bot.return_value.username = "mybot"
+
+        await forward_command_handler(update, _make_context())
+
+        self.mock_sm.send_to_window.assert_not_called()
 
     async def test_confirmation_message_shows_resolved_name(self) -> None:
         update = _make_update(text="/committing_code")

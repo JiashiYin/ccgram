@@ -12,12 +12,14 @@ from telegram.error import BadRequest, TelegramError
 from tests.ccgram.conftest import make_mock_provider
 
 from ccgram.handlers.status_polling import (
+    PendingNotifyReport,
     _check_autoclose_timers,
     _check_transcript_activity,
     _clear_autoclose_if_active,
     _dead_notified,
     _get_window_state,
     _handle_dead_window_notification,
+    _handle_missing_window,
     _MAX_PROBE_FAILURES,
     _pane_alert_hashes,
     _parse_with_pyte,
@@ -771,6 +773,43 @@ class TestTransitionToIdle:
             await _transition_to_idle(bot, 1, "@0", 42, -100, "project", mode)
         mock_enqueue.assert_called_once_with(bot, 1, "@0", None, thread_id=42)
 
+    async def test_notify_mode_flushes_pending_report_back_on_idle(self) -> None:
+        from ccgram.handlers.status_polling import _transition_to_idle
+
+        bot = AsyncMock(spec=Bot)
+        with (
+            patch("ccgram.handlers.status_polling.update_topic_emoji"),
+            patch(
+                "ccgram.handlers.status_polling.enqueue_status_update"
+            ) as mock_status,
+            patch(
+                "ccgram.handlers.status_polling.pop_pending_notify_report",
+                return_value=PendingNotifyReport(
+                    text="I finished the task and need your next step.",
+                    content_type="text",
+                    role="assistant",
+                ),
+            ),
+            patch(
+                "ccgram.handlers.status_polling.build_response_parts",
+                return_value=["I finished the task and need your next step."],
+            ) as mock_parts,
+            patch(
+                "ccgram.handlers.status_polling.enqueue_content_message",
+                new_callable=AsyncMock,
+            ) as mock_enqueue,
+        ):
+            await _transition_to_idle(bot, 1, "@0", 42, -100, "project", "notify")
+
+        mock_parts.assert_called_once_with(
+            "I finished the task and need your next step.",
+            True,
+            "text",
+            "assistant",
+        )
+        mock_enqueue.assert_awaited_once()
+        mock_status.assert_called_once_with(bot, 1, "@0", None, thread_id=42)
+
 
 class TestShellPromptClearsStatus:
     async def test_shell_prompt_enqueues_status_clear(self) -> None:
@@ -824,6 +863,68 @@ class TestShellPromptClearsStatus:
             bot, 1, "@0", IDLE_STATUS_TEXT, thread_id=42
         )
         assert not _has_autoclose(1, 42)
+
+
+class TestMissingNotifyWindowCleanup:
+    async def test_notify_window_is_deleted_after_confirmation(self) -> None:
+        bot = AsyncMock(spec=Bot)
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.remove_topic",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_remove_topic,
+            patch(
+                "ccgram.handlers.status_polling.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as mock_clear_topic,
+            patch(
+                "ccgram.handlers.status_polling.purge_dead_window_state"
+            ) as mock_purge,
+        ):
+            mock_sm.get_notification_mode.return_value = "notify"
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@0")]
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _handle_missing_window(bot, 1, 42, "@0")
+            mock_remove_topic.assert_not_awaited()
+
+            await _handle_missing_window(bot, 1, 42, "@0")
+
+        mock_remove_topic.assert_awaited_once_with(bot, -100, 42)
+        mock_clear_topic.assert_awaited_once_with(1, 42, bot=bot, window_id="@0")
+        mock_sm.unbind_thread.assert_called_once_with(1, 42)
+        mock_purge.assert_called_once_with("@0")
+
+
+class TestDuplicateNotifyBindingCleanup:
+    async def test_duplicate_notify_topic_is_removed(self) -> None:
+        from ccgram.handlers.status_polling import _cleanup_duplicate_notify_bindings
+
+        bot = AsyncMock(spec=Bot)
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.remove_topic",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_remove_topic,
+            patch(
+                "ccgram.handlers.status_polling.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as mock_clear_topic,
+        ):
+            mock_sm.find_redundant_notify_session_bindings.return_value = [(1, 42, "@0")]
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _cleanup_duplicate_notify_bindings(bot)
+
+        mock_remove_topic.assert_awaited_once_with(bot, -100, 42)
+        mock_clear_topic.assert_awaited_once_with(1, 42, bot=bot, window_id="@0")
+        mock_sm.unbind_thread.assert_called_once_with(1, 42)
 
 
 class TestProbeFailures:

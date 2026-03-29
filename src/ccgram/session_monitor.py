@@ -96,6 +96,8 @@ class NewMessage:
     tool_use_id: str | None = None
     role: str = "assistant"  # "user" or "assistant"
     tool_name: str | None = None  # For tool_use messages, the tool name
+    phase: str | None = None
+    notify_kind: str | None = None
 
 
 @dataclass
@@ -543,6 +545,8 @@ class SessionMonitor:
                     tool_use_id=entry.tool_use_id,
                     role=entry.role,
                     tool_name=entry.tool_name,
+                    phase=entry.phase,
+                    notify_kind=entry.notify_kind,
                 )
             )
 

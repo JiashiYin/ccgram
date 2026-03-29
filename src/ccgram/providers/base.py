@@ -20,6 +20,7 @@ from typing import Any, Literal, Protocol
 # ── Type aliases for AgentMessage fields ─────────────────────────────────
 MessageRole = Literal["user", "assistant"]
 ContentType = Literal["text", "thinking", "tool_use", "tool_result", "local_command"]
+NotifyKind = Literal["commentary", "report_back"]
 
 # ── Shared validation ────────────────────────────────────────────────────
 # Alphanumeric + hyphens/underscores — rejects shell metacharacters.
@@ -64,6 +65,8 @@ class AgentMessage:
     tool_use_id: str | None = None
     tool_name: str | None = None
     timestamp: str | None = None
+    phase: str | None = None
+    notify_kind: NotifyKind | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +118,7 @@ class ProviderCapabilities:
     supports_incremental_read: bool = True  # False → whole-file JSON (e.g. Gemini)
     transcript_format: Literal["jsonl", "plain"] = "jsonl"
     uses_pane_title: bool = False  # Provider reads OSC pane title for status
+    supports_semantic_notify: bool = False
     builtin_commands: tuple[str, ...] = ()
     # When true, CommandCatalog appends user-defined commands discovered from
     # the configured command sources (currently ~/.claude skills/commands).

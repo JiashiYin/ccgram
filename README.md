@@ -1,4 +1,4 @@
-# CCGram Notify
+# CCGram Notify for Codex
 
 [![CI](https://github.com/alexei-led/ccgram/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/alexei-led/ccgram/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ccgram)](https://pypi.org/project/ccgram/)
@@ -8,9 +8,9 @@
 [![License](https://img.shields.io/github/license/alexei-led/ccgram)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Control AI coding agents from your phone. CCGram bridges Telegram to running agent sessions so you can monitor output, respond to prompts, and manage work without touching your computer. This fork packages that bridge as **CCGram Notify**: a Codex-first install flow that keeps normal local `codex` launches in your native terminal while surfacing blocker prompts to Telegram in quiet `notify` mode, and keeps Telegram-opened sessions fully `interactive`.
+Control AI coding agents from your phone. CCGram bridges Telegram to running agent sessions so you can monitor output, respond to prompts, and manage work without touching your computer. This fork packages that bridge as **CCGram Notify for Codex**: a Codex-first install flow that keeps normal local `codex` launches in your native terminal while surfacing blocker prompts and Codex halt report-backs to Telegram in quiet `notify` mode, and keeps Telegram-opened sessions fully `interactive`.
 
-CCGram Notify still supports [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), and plain shell sessions with LLM command generation.
+The underlying bridge core still supports [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), [Gemini CLI](https://github.com/google-gemini/gemini-cli), and plain shell sessions. But the polished local notify workflow in this release is Codex-first: interactive monitoring works across providers, while non-interactive halt report-backs are only first-class for Codex today.
 
 ## Why CCGram?
 
@@ -88,12 +88,12 @@ Each Telegram Forum topic binds to one tmux window running an agent CLI. Message
 - Assistant responses, thinking content, tool use/result pairs, and command output
 - Live status line showing what the agent is currently doing
 - Entity-based formatting with automatic plain text fallback
-- Notify mode suppresses routine chatter and only delivers explicit milestone/final summaries when the assistant prefixes a message with `[CCGRAM_MILESTONE]` or `[CCGRAM_FINAL]`. The marker is stripped before Telegram delivery.
+- Notify mode suppresses routine chatter and only breaks through when the agent truly halts: blocking prompts, Codex report-backs, and failure/dead notices.
 
 ## Modes
 
 - `interactive`: full Telegram mirror for sessions intentionally opened or rebound from Telegram
-- `notify`: quiet monitoring for unattended or normally launched sessions; only blocking prompts, failure/dead notices, and explicit milestone/final summaries break through
+- `notify`: quiet monitoring for unattended or normally launched sessions; only blocking prompts, Codex halt report-backs, and failure/dead notices break through
 
 **Session management**
 
@@ -230,6 +230,15 @@ That launch stays in your native terminal, ensures the local background bridge i
 
 Telegram-created sessions stay `interactive`, so the user-opened topic remains fully chatty like a remote terminal.
 
+If multiple CCGram bots share the same Telegram group:
+
+- bot-created topics remember their creator as the default responder
+- user-created shared topics need one explicit leading mention first, such as `@YourBotUsername fix the tests`
+- after that first explicit message, the topic remembers that bot as the default responder using a visible topic-name marker like `[@YourBotUsername]`
+- once the marker is set, unaddressed messages route only to that bot
+
+Single-bot groups stay seamless: users do not need to learn or use `@bot` targeting.
+
 If you explicitly want the tmux-backed remote-terminal experience locally, use:
 
 ```bash
@@ -258,22 +267,17 @@ Remove the shell hook and direct-launch override completely:
 ccgram notify uninstall
 ```
 
-### Notify-mode summaries
+### Notify-mode halt delivery
 
-Quiet `notify` topics stay silent unless there is a blocking prompt or the agent emits an explicit summary marker. Use these prefixes in assistant output:
+Quiet `notify` topics stay silent while the agent is still working. Telegram only interrupts when the session halts:
 
-```text
-[CCGRAM_MILESTONE] shell integration installed
-[CCGRAM_FINAL] task complete, tests passed
-```
+- blocking prompts surface automatically and remain interactive
+- Codex report-backs surface automatically once the session becomes idle and is waiting for you
+- dead or failed sessions break through and are cleaned up instead of piling up as stale topics
 
-CCGram strips the marker before forwarding the message to Telegram.
+Routine progress stays quiet in `notify`; there is no special marker syntax to add to prompts or skills. Codex is the first-class notify provider in this release. Non-interactive halt delivery uses Codex transcript turn semantics, including explicit final-answer turns and Codex task-completion events, instead of forwarding generic commentary.
 
-For unattended work, this is the expected contract:
-
-- routine progress stays quiet in `notify`
-- blocking prompts surface automatically
-- milestone and final summaries must be explicit
+Other providers can still use the bridge interactively, but they do not yet get the same non-interactive report-back guarantees in quiet notify mode.
 
 ## Migrating from ccbot
 

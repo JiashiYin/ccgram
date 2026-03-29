@@ -11,7 +11,7 @@ import asyncio
 import structlog
 from pathlib import Path
 from telegram import Bot, Message, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, MessageEntityType
 from telegram.ext import ContextTypes
 
 from .callback_helpers import get_thread_id as _get_thread_id
@@ -38,6 +38,12 @@ from .message_sender import (
 )
 from .recovery_callbacks import build_recovery_keyboard
 from .status_polling import clear_probe_failures
+from .topic_emoji import update_stored_topic_name
+from .topic_routing import (
+    classify_topic_routing,
+    format_topic_name_with_default_responder,
+    leading_bot_target,
+)
 from .user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT, RECOVERY_WINDOW_ID
 from ..session import session_manager
 from ..providers import get_provider_for_window
@@ -51,6 +57,44 @@ _BASH_OUTPUT_LIMIT = 3800
 
 # Active bash capture tasks: (user_id, thread_id) -> asyncio.Task
 _bash_capture_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+
+
+def _resolve_targeted_text(message: Message) -> str | None:
+    """Normalize a text message for this bot, or ignore messages for another bot.
+
+    In shared Telegram groups, a leading ``@botname`` mention acts as an explicit
+    target selector. This bot only handles such a message when the mention matches
+    its own username. When it does match, the mention is stripped before the text
+    is forwarded to the bound agent session.
+    """
+    text = message.text or ""
+    entities = list(message.entities or [])
+    if not text or not entities:
+        return text
+
+    first = entities[0]
+    if first.offset != 0:
+        return text
+
+    bot = message.get_bot()
+    bot_username = getattr(bot, "username", None)
+    bot_id = getattr(bot, "id", None)
+
+    if first.type == MessageEntityType.MENTION:
+        mention = text[: first.length]
+        if bot_username and mention.casefold() == f"@{bot_username}".casefold():
+            return text[first.length :].lstrip(" \t\r\n,:-")
+        return None
+
+    if first.type == MessageEntityType.TEXT_MENTION:
+        entity_user = getattr(first, "user", None)
+        if entity_user is not None and bot_id is not None:
+            if entity_user.id == bot_id:
+                return text[first.length :].lstrip(" \t\r\n,:-")
+            if getattr(entity_user, "is_bot", False):
+                return None
+
+    return text
 
 
 def _cancel_bash_capture(user_id: int, thread_id: int) -> None:
@@ -313,7 +357,7 @@ async def _forward_message(
     text: str,
     bot: Bot,
     message: Message,
-) -> None:
+) -> bool:
     """Forward a text message to the bound tmux window."""
     await message.chat.send_action(ChatAction.TYPING)  # type: ignore[union-attr]
     # Enqueue a status clear to actually delete the Telegram message
@@ -328,7 +372,7 @@ async def _forward_message(
     success, err_message = await session_manager.send_to_window(window_id, text)
     if not success:
         await safe_reply(message, f"\u274c {err_message}")
-        return
+        return False
 
     await ack_reaction(bot, message.chat.id, message.message_id)
 
@@ -350,6 +394,73 @@ async def _forward_message(
     if interactive_window and interactive_window == window_id:
         await asyncio.sleep(0.2)
         await handle_interactive_ui(bot, user_id, window_id, thread_id)
+    return True
+
+
+async def _claim_topic_default_responder(
+    message: Message,
+    *,
+    thread_id: int,
+    window_id: str,
+    bot_username: str,
+) -> None:
+    """Persist this bot as the topic's default responder via the topic name."""
+    display_name = session_manager.get_display_name(window_id)
+    new_clean_name = format_topic_name_with_default_responder(display_name, bot_username)
+    if new_clean_name == display_name:
+        return
+
+    chat_id = message.chat.id
+    try:
+        await message.get_bot().edit_forum_topic(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            name=new_clean_name,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to claim topic default responder for thread %s as %s",
+            thread_id,
+            bot_username,
+        )
+        return
+
+    session_manager.set_display_name(window_id, new_clean_name)
+    update_stored_topic_name(chat_id, thread_id, new_clean_name)
+    logger.info(
+        "Claimed topic default responder for thread %s as %s",
+        thread_id,
+        bot_username,
+    )
+
+
+async def _gate_topic_targeting(
+    message: Message,
+    *,
+    window_id: str,
+) -> tuple[bool, str | None, bool]:
+    """Apply shared-topic routing rules before forwarding user text."""
+    explicit_target = leading_bot_target(message)
+    bot_username = getattr(message.get_bot(), "username", None)
+    display_name = session_manager.get_display_name(window_id)
+    decision, claim_default = await classify_topic_routing(
+        bot=message.get_bot(),
+        chat_id=message.chat.id,
+        display_name=display_name,
+        bot_username=bot_username,
+        explicit_self_target=explicit_target is not None,
+    )
+    if decision == "ignore":
+        return True, bot_username, False
+    if decision == "prompt":
+        await safe_reply(
+            message,
+            "Multiple bots are available in this topic. Start by addressing one explicitly, "
+            f"for example `@{bot_username} ...`. Once a bot is addressed explicitly, this "
+            "topic will remember it as the default responder.",
+        )
+        return True, bot_username, False
+    return False, bot_username, claim_default
 
 
 async def handle_text_message(
@@ -364,7 +475,10 @@ async def handle_text_message(
     assert user is not None  # guaranteed by caller
     assert message is not None and message.text  # guaranteed by caller
 
-    text = message.text
+    text = _resolve_targeted_text(message)
+    if text is None:
+        logger.debug("Ignoring message addressed to another bot")
+        return
     thread_id = _get_thread_id(update)
 
     # Store group chat_id for forum topic message routing
@@ -409,5 +523,25 @@ async def handle_text_message(
         )
         return
 
+    handled, bot_username, claim_default = await _gate_topic_targeting(
+        message,
+        window_id=window_id,
+    )
+    if handled:
+        return
+
     # Forward message to window
-    await _forward_message(window_id, user.id, thread_id, text, context.bot, message)
+    forwarded = await _forward_message(
+        window_id, user.id, thread_id, text, context.bot, message
+    )
+    if (
+        forwarded
+        and claim_default
+        and bot_username
+    ):
+        await _claim_topic_default_responder(
+            message,
+            thread_id=thread_id,
+            window_id=window_id,
+            bot_username=bot_username,
+        )

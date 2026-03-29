@@ -295,7 +295,7 @@ class TmuxManager:
             )
             async with asyncio.timeout(5.0):
                 stdout, _ = await proc.communicate()
-        except TimeoutError, OSError:
+        except (TimeoutError, OSError):
             return None
         if proc.returncode != 0:
             return None
@@ -576,7 +576,7 @@ class TmuxManager:
                     check=False,
                 )
             return True
-        except subprocess.TimeoutExpired, OSError:
+        except (subprocess.TimeoutExpired, OSError):
             logger.exception("Failed to send keys to foreign window %s", target)
             return False
 
@@ -700,6 +700,22 @@ class TmuxManager:
             True if successful, False otherwise
         """
         if is_native_window(window_id):
+            if literal and enter and not raw:
+                sent = send_native_keys(
+                    window_id,
+                    text,
+                    enter=False,
+                    literal=True,
+                )
+                if not sent:
+                    return False
+                await asyncio.sleep(0.2)
+                return send_native_keys(
+                    window_id,
+                    "Enter",
+                    enter=False,
+                    literal=False,
+                )
             return send_native_keys(
                 window_id,
                 text,
@@ -774,7 +790,7 @@ class TmuxManager:
             )
             async with asyncio.timeout(5.0):
                 stdout, _ = await proc.communicate()
-        except TimeoutError, OSError:
+        except (TimeoutError, OSError):
             return []
         if proc.returncode != 0:
             return []
@@ -816,7 +832,7 @@ class TmuxManager:
             )
             async with asyncio.timeout(5.0):
                 win_stdout, _ = await proc.communicate()
-        except TimeoutError, OSError:
+        except (TimeoutError, OSError):
             return []
         if proc.returncode != 0:
             return []

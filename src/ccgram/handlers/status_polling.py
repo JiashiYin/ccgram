@@ -61,14 +61,16 @@ from .interactive_ui import (
     handle_interactive_ui,
     set_interactive_mode,
 )
-from .cleanup import clear_topic_state
+from .cleanup import clear_topic_state, remove_topic
 from .message_queue import (
     clear_tool_msg_ids_for_topic,
+    enqueue_content_message,
     enqueue_status_update,
     get_message_queue,
 )
 from .message_sender import rate_limit_send_message
 from .recovery_callbacks import build_recovery_keyboard
+from .response_builder import build_response_parts
 from .topic_delivery import recreate_notify_topic_binding
 from .topic_emoji import update_topic_emoji
 
@@ -109,6 +111,7 @@ _STARTUP_TIMEOUT = 30.0
 # Remote Control detection debounce: require RC to be absent for this many
 # seconds before clearing the badge (avoids flicker during brief screen redraws).
 _RC_DEBOUNCE_SECONDS = 3.0
+_DEAD_WINDOW_CONFIRMATION_POLLS = 2
 
 
 # ── Consolidated per-window and per-topic polling state ────────────────
@@ -130,6 +133,16 @@ class WindowPollState:
     rc_active: bool = False
     rc_off_since: float | None = None  # debounce RC removal (3s)
     last_rc_detected: bool = False  # raw detection result (before debounce)
+    missing_polls: int = 0
+
+
+@dataclass
+class PendingNotifyReport:
+    """Deferred notify-mode report-back delivered when the session halts."""
+
+    text: str
+    content_type: str = "text"
+    role: str = "assistant"
 
 
 @dataclass
@@ -138,6 +151,7 @@ class TopicPollState:
 
     autoclose: tuple[str, float] | None = None
     last_typing_sent: float | None = None
+    pending_notify_report: PendingNotifyReport | None = None
 
 
 _window_poll_state: dict[str, WindowPollState] = {}
@@ -193,6 +207,48 @@ def clear_window_poll_state(window_id: str) -> None:
 def clear_topic_poll_state(user_id: int, thread_id: int) -> None:
     """Remove all polling state for a topic."""
     _topic_poll_state.pop((user_id, thread_id), None)
+
+
+def stage_pending_notify_report(
+    user_id: int,
+    thread_id: int | None,
+    *,
+    text: str,
+    content_type: str = "text",
+    role: str = "assistant",
+) -> None:
+    """Store a notify-mode report-back until the session actually halts."""
+    if thread_id is None or not text.strip():
+        return
+    ts = _get_topic_state(user_id, thread_id)
+    ts.pending_notify_report = PendingNotifyReport(
+        text=text,
+        content_type=content_type,
+        role=role,
+    )
+
+
+def pop_pending_notify_report(
+    user_id: int, thread_id: int | None
+) -> PendingNotifyReport | None:
+    """Return and clear the pending notify-mode report for a topic."""
+    if thread_id is None:
+        return None
+    ts = _topic_poll_state.get((user_id, thread_id))
+    if ts is None:
+        return None
+    report = ts.pending_notify_report
+    ts.pending_notify_report = None
+    return report
+
+
+def clear_pending_notify_report(user_id: int, thread_id: int | None) -> None:
+    """Drop any cached notify-mode report for a topic."""
+    if thread_id is None:
+        return
+    ts = _topic_poll_state.get((user_id, thread_id))
+    if ts is not None:
+        ts.pending_notify_report = None
 
 
 def reset_screen_buffer_state() -> None:
@@ -406,18 +462,7 @@ async def _check_autoclose_timers(bot: Bot) -> None:
     for user_id, thread_id in expired:
         chat_id = session_manager.resolve_chat_id(user_id, thread_id)
         window_id = session_manager.get_window_for_thread(user_id, thread_id)
-        removed = False
-        try:
-            await bot.delete_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
-            removed = True
-        except TelegramError:
-            try:
-                await bot.close_forum_topic(
-                    chat_id=chat_id, message_thread_id=thread_id
-                )
-                removed = True
-            except TelegramError as e:
-                logger.debug("Failed to auto-close topic thread=%d: %s", thread_id, e)
+        removed = await remove_topic(bot, chat_id, thread_id)
         if removed:
             ts = _topic_poll_state.get((user_id, thread_id))
             if ts:
@@ -454,6 +499,74 @@ def _check_transcript_activity(window_id: str, now: float) -> bool:
     return False
 
 
+def purge_dead_window_state(window_id: str) -> None:
+    """Purge persisted state for a confirmed-dead window."""
+    session_manager.purge_dead_window_state(window_id)
+
+
+async def _flush_pending_notify_report(
+    bot: Bot,
+    user_id: int,
+    window_id: str,
+    thread_id: int | None,
+) -> bool:
+    """Deliver a cached notify-mode report-back when the session halts."""
+    report = pop_pending_notify_report(user_id, thread_id)
+    if report is None or thread_id is None:
+        return False
+
+    parts = build_response_parts(
+        report.text,
+        True,
+        report.content_type,
+        report.role,
+    )
+    await enqueue_content_message(
+        bot=bot,
+        user_id=user_id,
+        window_id=window_id,
+        parts=parts,
+        tool_use_id=None,
+        content_type=report.content_type,
+        text=report.text,
+        thread_id=thread_id,
+    )
+    return True
+
+
+async def _cleanup_dead_notify_window(bot: Bot, window_id: str) -> None:
+    """Delete/close notify topics for a dead window and purge local state."""
+    bindings = [
+        (user_id, thread_id)
+        for user_id, thread_id, wid in session_manager.iter_thread_bindings()
+        if wid == window_id
+    ]
+    for user_id, thread_id in bindings:
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        if chat_id != user_id:
+            await remove_topic(bot, chat_id, thread_id)
+        await clear_topic_state(user_id, thread_id, bot=bot, window_id=window_id)
+        session_manager.unbind_thread(user_id, thread_id)
+    purge_dead_window_state(window_id)
+
+
+async def _handle_missing_window(
+    bot: Bot, user_id: int, thread_id: int, wid: str
+) -> None:
+    """Handle a bound window that is absent from the live window list."""
+    ws = _get_window_state(wid)
+    ws.missing_polls += 1
+
+    if session_manager.get_notification_mode(wid) != "notify":
+        await _handle_dead_window_notification(bot, user_id, thread_id, wid)
+        return
+
+    if ws.missing_polls < _DEAD_WINDOW_CONFIRMATION_POLLS:
+        return
+
+    await _cleanup_dead_notify_window(bot, wid)
+
+
 async def _transition_to_idle(
     bot: Bot,
     user_id: int,
@@ -464,7 +577,9 @@ async def _transition_to_idle(
     notif_mode: str,
 ) -> None:
     """Transition a window to idle state (emoji, autoclose, typing, status)."""
-    _get_window_state(window_id).startup_time = None
+    ws = _get_window_state(window_id)
+    ws.startup_time = None
+    ws.missing_polls = 0
     await update_topic_emoji(bot, chat_id, thread_id, "idle", display)
     _clear_autoclose_if_active(user_id, thread_id)
     _get_topic_state(user_id, thread_id).last_typing_sent = None
@@ -477,6 +592,8 @@ async def _transition_to_idle(
     else:
         # Muted windows: clear any lingering status message
         await enqueue_status_update(bot, user_id, window_id, None, thread_id=thread_id)
+        if notif_mode == "notify":
+            await _flush_pending_notify_report(bot, user_id, window_id, thread_id)
 
 
 async def _handle_no_status(
@@ -495,6 +612,7 @@ async def _handle_no_status(
     is_active = _check_transcript_activity(window_id, now)
 
     if is_active:
+        _get_window_state(window_id).missing_polls = 0
         await _send_typing_throttled(bot, user_id, thread_id)
         if thread_id is not None:
             chat_id = session_manager.resolve_chat_id(user_id, thread_id)
@@ -512,6 +630,7 @@ async def _handle_no_status(
 
     if is_shell_prompt(pane_current_command):
         ws.startup_time = None
+        ws.missing_polls = 0
         # Hookless providers (Codex/Gemini) often sit at shell-like prompts while
         # still being an active topic. Keep idle controls visible instead of
         # clearing the status message.
@@ -529,6 +648,8 @@ async def _handle_no_status(
         _start_autoclose_timer(user_id, thread_id, "done", now)
         _get_topic_state(user_id, thread_id).last_typing_sent = None
         await enqueue_status_update(bot, user_id, window_id, None, thread_id=thread_id)
+        if notif_mode == "notify":
+            await _flush_pending_notify_report(bot, user_id, window_id, thread_id)
     elif ws.has_seen_status:
         await _transition_to_idle(
             bot, user_id, window_id, thread_id, chat_id, display, notif_mode
@@ -536,6 +657,7 @@ async def _handle_no_status(
     elif ws.startup_time is None:
         # First poll without status — start grace period
         ws.startup_time = now
+        ws.missing_polls = 0
         await _send_typing_throttled(bot, user_id, thread_id)
         await update_topic_emoji(bot, chat_id, thread_id, "active", display)
         _clear_autoclose_if_active(user_id, thread_id)
@@ -547,6 +669,7 @@ async def _handle_no_status(
         )
     else:
         # Still in startup grace period
+        ws.missing_polls = 0
         await _send_typing_throttled(bot, user_id, thread_id)
         await update_topic_emoji(bot, chat_id, thread_id, "active", display)
         _clear_autoclose_if_active(user_id, thread_id)
@@ -902,6 +1025,7 @@ async def update_status_message(
         ws = _get_window_state(window_id)
         ws.has_seen_status = True
         ws.startup_time = None
+        ws.missing_polls = 0
         await _send_typing_throttled(bot, user_id, thread_id)
         if notif_mode not in ("notify", "muted", "errors_only"):
             # Append subagent names if any are active
@@ -1021,6 +1145,22 @@ async def _prune_stale_state(live_windows: list) -> None:
     live_pairs = [(w.window_id, w.window_name) for w in live_windows]
     session_manager.sync_display_names(live_pairs)
     session_manager.prune_stale_state(live_ids)
+
+
+async def _cleanup_duplicate_notify_bindings(bot: Bot) -> None:
+    """Drop older notify topics when the same session is rebound for one user."""
+    for user_id, thread_id, wid in session_manager.find_redundant_notify_session_bindings():
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        if chat_id != user_id:
+            await remove_topic(bot, chat_id, thread_id)
+        await clear_topic_state(user_id, thread_id, bot=bot, window_id=wid)
+        session_manager.unbind_thread(user_id, thread_id)
+        logger.info(
+            "Removed redundant notify binding: user=%d thread=%d window=%s",
+            user_id,
+            thread_id,
+            wid,
+        )
 
 
 async def _probe_topic_existence(bot: Bot) -> None:
@@ -1273,6 +1413,7 @@ async def status_poll_loop(bot: Bot) -> None:
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
                 await _prune_stale_state(all_windows)
+                await _cleanup_duplicate_notify_bindings(bot)
                 await _probe_topic_existence(bot)
                 # Sweep stale log-throttle entries to prevent unbounded growth
                 log_throttle_sweep()
@@ -1287,10 +1428,9 @@ async def status_poll_loop(bot: Bot) -> None:
 
                     w = window_lookup.get(wid)
                     if not w:
-                        await _handle_dead_window_notification(
-                            bot, user_id, thread_id, wid
-                        )
+                        await _handle_missing_window(bot, user_id, thread_id, wid)
                         continue
+                    _get_window_state(wid).missing_polls = 0
 
                     # Discover transcript for hookless providers (Codex, Gemini)
                     await _maybe_discover_transcript(

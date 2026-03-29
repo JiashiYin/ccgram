@@ -11,6 +11,7 @@ Functions:
 from typing import Any
 
 from telegram import Bot
+from telegram.error import BadRequest, TelegramError
 
 from ..utils import log_throttle_reset
 from .interactive_ui import clear_interactive_msg
@@ -113,3 +114,27 @@ async def clear_topic_state(
         stale = [k for k in voice_store if k[0] == chat_id]
         for k in stale:
             voice_store.pop(k, None)
+
+
+def is_topic_gone(exc: BadRequest) -> bool:
+    """Check if a Telegram BadRequest means the topic no longer exists."""
+    msg = exc.message.lower()
+    return "thread not found" in msg or "topic_id_invalid" in msg
+
+
+async def remove_topic(bot: Bot, chat_id: int, thread_id: int) -> bool:
+    """Try to delete a topic, falling back to close when needed."""
+    try:
+        await bot.delete_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
+        return True
+    except BadRequest as exc:
+        if is_topic_gone(exc):
+            return True
+    except TelegramError:
+        pass
+
+    try:
+        await bot.close_forum_topic(chat_id=chat_id, message_thread_id=thread_id)
+        return True
+    except TelegramError:
+        return False

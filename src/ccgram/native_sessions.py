@@ -39,6 +39,7 @@ NATIVE_WINDOW_PREFIX = "native:"
 _REGISTRY_FILE = "native-sessions.json"
 _RETENTION_SECS = 300.0
 _RAW_HISTORY_LIMIT = 200_000
+_CONTROL_SOCKET_GRACE_SECS = 5.0
 
 
 @dataclass
@@ -109,6 +110,48 @@ def _update_record(window_id: str, **changes: object) -> None:
     _save_registry(data)
 
 
+def _pid_is_running(pid: object) -> bool:
+    """Return whether a recorded native-session PID still exists."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _has_live_control_channel(record: dict[str, Any], *, now: float) -> bool:
+    """Return whether a running native session still has a usable control socket.
+
+    Fresh sessions get a short grace window while the control thread binds the
+    Unix socket. After that grace period, a missing socket means the session is
+    no longer actionable from Telegram and should be treated as dead.
+    """
+    control_socket = record.get("control_socket_path")
+    if not isinstance(control_socket, str) or not control_socket:
+        return False
+    path = Path(control_socket)
+    if path.exists():
+        return _control_socket_accepts_connections(path)
+    started_at = record.get("started_at")
+    return bool(
+        isinstance(started_at, (int, float))
+        and now - float(started_at) < _CONTROL_SOCKET_GRACE_SECS
+    )
+
+
+def _control_socket_accepts_connections(path: Path) -> bool:
+    """Return whether a native-session control socket is accepting clients."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.2)
+            client.connect(str(path))
+        return True
+    except (ConnectionRefusedError, FileNotFoundError, socket.timeout, OSError):
+        return False
+
+
 def _read_record(window_id: str) -> dict[str, Any] | None:
     data = _load_registry()
     sessions = data.get("sessions", {})
@@ -148,6 +191,7 @@ def register_native_session(
         "columns": columns,
         "rows": rows,
         "pid": pid,
+        "bridge_pid": os.getpid(),
         "running": True,
         "started_at": time.time(),
         "ended_at": None,
@@ -213,8 +257,15 @@ def remove_native_session(window_id: str) -> None:
     _save_registry(data)
 
 
-def list_native_windows(*, now: float | None = None) -> list[NativeWindow]:
-    """Return live or recently exited native sessions as window-like objects."""
+def list_native_windows(
+    *, now: float | None = None, include_exited: bool = False
+) -> list[NativeWindow]:
+    """Return live native sessions as window-like objects.
+
+    Exited sessions stay in the registry briefly for diagnostics and cleanup,
+    but they are hidden from the live window view unless ``include_exited`` is
+    explicitly requested.
+    """
     ts = time.time() if now is None else now
     data = _load_registry()
     sessions = data.get("sessions", {})
@@ -227,6 +278,21 @@ def list_native_windows(*, now: float | None = None) -> list[NativeWindow]:
         if not isinstance(record, dict):
             continue
         running = bool(record.get("running", False))
+        agent_pid = record.get("pid")
+        bridge_pid = record.get("bridge_pid")
+        if running and (
+            not _pid_is_running(agent_pid)
+            or (
+                bridge_pid is not None
+                and not _pid_is_running(bridge_pid)
+            )
+            or not _has_live_control_channel(record, now=ts)
+        ):
+            mark_native_session_exited(window_id, exit_code=-1, ended_at=ts)
+            record["running"] = False
+            record["ended_at"] = ts
+            record["exit_code"] = -1
+            running = False
         ended_at = record.get("ended_at")
         if (
             not running
@@ -234,6 +300,8 @@ def list_native_windows(*, now: float | None = None) -> list[NativeWindow]:
             and ts - float(ended_at) > _RETENTION_SECS
         ):
             stale.append(window_id)
+            continue
+        if not running and not include_exited:
             continue
 
         windows.append(
@@ -348,7 +416,7 @@ def send_native_keys(
                 client.connect(control_socket)
                 client.sendall(payload)
             return True
-        except FileNotFoundError, ConnectionRefusedError:
+        except (FileNotFoundError, ConnectionRefusedError):
             time.sleep(0.05)
         except OSError:
             logger.exception("Failed to send keys to native session %s", window_id)
@@ -401,7 +469,7 @@ def _run_control_server(
         while not stop_event.is_set():
             try:
                 conn, _ = server.accept()
-            except TimeoutError, socket.timeout:
+            except (TimeoutError, socket.timeout):
                 continue
             except OSError:
                 return

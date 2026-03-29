@@ -34,6 +34,7 @@ import aiofiles
 
 from .config import config
 from .handlers.callback_data import NOTIFICATION_MODES
+from .native_sessions import is_native_window
 from .providers import get_provider_for_window
 from .state_persistence import StatePersistence
 from .tmux_manager import tmux_manager
@@ -57,6 +58,7 @@ _LEGACY_NOTIFICATION_MODE_MAP = {
     "normal": "interactive",
     "passive": "notify",
 }
+_MIN_DUPLICATE_SESSION_BINDINGS = 2
 
 
 def _normalize_notification_mode(mode: str) -> str:
@@ -77,6 +79,7 @@ def parse_session_map(raw: dict[str, Any], prefix: str) -> dict[str, dict[str, s
     """Parse session_map.json entries matching a tmux session prefix.
 
     Also matches legacy "ccbot:" prefix keys when the current prefix is "ccgram:".
+    Native-window keys are already canonical and are accepted as-is.
     Returns {window_name: {"session_id": ..., "cwd": ...}} for matching entries.
     """
     result: dict[str, dict[str, str]] = {}
@@ -87,6 +90,8 @@ def parse_session_map(raw: dict[str, Any], prefix: str) -> dict[str, dict[str, s
             window_name = key[len(prefix) :]
         elif legacy_prefix and key.startswith(legacy_prefix):
             window_name = key[len(legacy_prefix) :]
+        elif is_native_window(key):
+            window_name = key
         else:
             continue
         if not isinstance(info, dict):
@@ -768,6 +773,67 @@ class SessionManager:
             del self.window_states[wid]
         self._save_state()
         return True
+
+    def purge_dead_window_state(self, window_id: str) -> bool:
+        """Remove persisted state for a confirmed-dead window.
+
+        This is stricter than the general stale-state pruning because it runs
+        after the caller has already confirmed the underlying tmux/native
+        session is gone and all bindings for the window have been removed.
+        """
+        changed = False
+
+        if window_id in self.window_states:
+            logger.info("Purging dead window_state: %s", window_id)
+            del self.window_states[window_id]
+            changed = True
+
+        if self.window_display_names.pop(window_id, None) is not None:
+            logger.info("Purging dead display name: %s", window_id)
+            changed = True
+
+        empty_users: list[int] = []
+        for user_id, offsets in self.user_window_offsets.items():
+            if offsets.pop(window_id, None) is not None:
+                logger.info(
+                    "Purging dead offset entry: user %d, window %s",
+                    user_id,
+                    window_id,
+                )
+                changed = True
+            if not offsets:
+                empty_users.append(user_id)
+        for user_id in empty_users:
+            del self.user_window_offsets[user_id]
+            changed = True
+
+        if config.session_map_file.exists():
+            try:
+                raw = json.loads(config.session_map_file.read_text())
+            except (json.JSONDecodeError, OSError):  # fmt: skip
+                raw = None
+            if isinstance(raw, dict):
+                removed = False
+                if window_id.startswith(EMDASH_SESSION_PREFIX):
+                    removed = raw.pop(window_id, None) is not None
+                else:
+                    removed = (
+                        raw.pop(f"{config.tmux_session_name}:{window_id}", None)
+                        is not None
+                    )
+                if removed:
+                    logger.info("Purging dead session_map entry: %s", window_id)
+                    atomic_write_json(config.session_map_file, raw)
+
+        if changed:
+            self._save_state()
+
+        from .native_sessions import is_native_window, remove_native_session
+
+        if is_native_window(window_id):
+            remove_native_session(window_id)
+
+        return changed
 
     def _sync_window_from_session_map(
         self,
@@ -1502,11 +1568,84 @@ class SessionManager:
         Returns list of (user_id, window_id, thread_id) tuples.
         """
         result: list[tuple[int, str, int]] = []
+        per_user_best: dict[int, tuple[int, str, int]] = {}
         for user_id, thread_id, window_id in self.iter_thread_bindings():
             state = self.window_states.get(window_id)
             if state and state.session_id == session_id:
-                result.append((user_id, window_id, thread_id))
+                candidate = (user_id, window_id, thread_id)
+                current = per_user_best.get(user_id)
+                if current is None or self._prefer_session_binding(candidate, current):
+                    per_user_best[user_id] = candidate
+        result.extend(per_user_best.values())
         return result
+
+    def find_redundant_notify_session_bindings(self) -> list[tuple[int, int, str]]:
+        """Find lower-priority notify bindings for the same user/session.
+
+        Returns ``(user_id, thread_id, window_id)`` tuples for bindings that should
+        be removed because a better binding already exists for the same session.
+        Only notify-mode bindings are returned so interactive topics are never
+        auto-deleted by this cleanup path.
+        """
+        grouped: dict[tuple[int, str], list[tuple[int, str, int]]] = {}
+        for user_id, thread_id, window_id in self.iter_thread_bindings():
+            state = self.window_states.get(window_id)
+            session_id = state.session_id if state else ""
+            if not session_id:
+                continue
+            grouped.setdefault((user_id, session_id), []).append(
+                (user_id, window_id, thread_id)
+            )
+
+        redundant: list[tuple[int, int, str]] = []
+        for (user_id, _session_id), bindings in grouped.items():
+            if len(bindings) < _MIN_DUPLICATE_SESSION_BINDINGS:
+                continue
+            keep = bindings[0]
+            for candidate in bindings[1:]:
+                if self._prefer_session_binding(candidate, keep):
+                    keep = candidate
+
+            for candidate in bindings:
+                if candidate == keep:
+                    continue
+                _, window_id, thread_id = candidate
+                if self.get_notification_mode(window_id) == "notify":
+                    redundant.append((user_id, thread_id, window_id))
+
+        return redundant
+
+    def _prefer_session_binding(
+        self,
+        candidate: tuple[int, str, int],
+        current: tuple[int, str, int],
+    ) -> bool:
+        """Choose the best binding when one user has duplicate session bindings."""
+        _, candidate_window, candidate_thread = candidate
+        _, current_window, current_thread = current
+
+        candidate_priority = self._session_binding_priority(candidate_window)
+        current_priority = self._session_binding_priority(current_window)
+        if candidate_priority != current_priority:
+            return candidate_priority > current_priority
+
+        candidate_native = is_native_window(candidate_window)
+        current_native = is_native_window(current_window)
+        if candidate_native != current_native:
+            return candidate_native
+
+        return candidate_thread > current_thread
+
+    def _session_binding_priority(self, window_id: str) -> int:
+        """Rank bindings so one user/session routes to the most useful topic."""
+        mode = self.get_notification_mode(window_id)
+        priorities = {
+            "interactive": 3,
+            "errors_only": 2,
+            "notify": 1,
+            "muted": 0,
+        }
+        return priorities.get(mode, 0)
 
     # --- Group chat ID management ---
 
