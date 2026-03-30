@@ -67,6 +67,46 @@ class TestPendingToolsCleanup:
 
         assert old_sid not in monitor._pending_tools
 
+    async def test_detect_changes_keeps_session_if_same_session_still_exists(
+        self, monitor: SessionMonitor
+    ) -> None:
+        session_id = "dup-session"
+
+        monitor._last_session_map = {
+            "native:old": {
+                "session_id": session_id,
+                "cwd": "/proj",
+                "window_name": "proj",
+            },
+            "native:live": {
+                "session_id": session_id,
+                "cwd": "/proj",
+                "window_name": "proj",
+            },
+        }
+        monitor.state.update_session(
+            TrackedSession(session_id=session_id, file_path="/fake/path")
+        )
+
+        current_map = {
+            "native:live": {
+                "session_id": session_id,
+                "cwd": "/proj",
+                "window_name": "proj",
+            }
+        }
+
+        with patch.object(
+            monitor,
+            "_load_current_session_map",
+            spec=True,
+            new_callable=AsyncMock,
+            return_value=current_map,
+        ):
+            await monitor._detect_and_cleanup_changes()
+
+        assert monitor.state.get_session(session_id) is not None
+
 
 class TestNewWindowDetection:
     async def test_callback_fires_for_new_window(self, monitor: SessionMonitor) -> None:

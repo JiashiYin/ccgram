@@ -425,6 +425,33 @@ class TestPruneSessionMap:
         result = json.loads(session_map_file.read_text())
         assert "ccgram:@5" not in result
 
+    def test_prunes_dead_native_entries(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "native:dead123": {"session_id": "sid-dead", "cwd": "/a"},
+                    "native:live456": {"session_id": "sid-live", "cwd": "/b"},
+                }
+            )
+        )
+
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        mgr.window_states["native:dead123"] = WindowState(session_id="sid-dead", cwd="/a")
+        mgr.window_states["native:live456"] = WindowState(session_id="sid-live", cwd="/b")
+
+        mgr.prune_session_map(live_window_ids={"native:live456"})
+
+        result = json.loads(session_map_file.read_text())
+        assert "native:dead123" not in result
+        assert "native:live456" in result
+        assert "native:dead123" not in mgr.window_states
+        assert "native:live456" in mgr.window_states
+
 
 class TestWindowStateProviderName:
     def test_default_provider_name_is_empty(self) -> None:

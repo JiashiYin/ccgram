@@ -549,10 +549,13 @@ class SessionManager:
         prefix = f"{config.tmux_session_name}:"
         dead_entries: list[tuple[str, str]] = []  # (map_key, window_id)
         for key in raw:
-            if not key.startswith(prefix):
+            if key.startswith(prefix):
+                window_id = key[len(prefix) :]
+            elif is_native_window(key):
+                window_id = key
+            else:
                 continue
-            window_id = key[len(prefix) :]
-            if self._is_window_id(window_id) and window_id not in live_window_ids:
+            if window_id not in live_window_ids:
                 dead_entries.append((key, window_id))
 
         if not dead_entries:

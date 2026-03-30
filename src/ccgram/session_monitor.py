@@ -671,6 +671,7 @@ class SessionMonitor:
         Returns current session_map for further processing.
         """
         current_map = await self._load_current_session_map()
+        active_session_ids = {details["session_id"] for details in current_map.values()}
 
         sessions_to_remove: set[str] = set()
 
@@ -702,6 +703,7 @@ class SessionMonitor:
 
         # Perform cleanup
         if sessions_to_remove:
+            sessions_to_remove -= active_session_ids
             for session_id in sessions_to_remove:
                 self.state.remove_session(session_id)
                 self._file_mtimes.pop(session_id, None)
