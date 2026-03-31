@@ -55,11 +55,27 @@ _VIM_PROBE_DELAY = 0.12
 # The TUIs we bridge can treat an immediate Enter as a newline instead
 # of a submit, especially for longer or multiline pastes.
 _LITERAL_SUBMIT_SETTLE_DELAY = 0.5
+_NATIVE_SNAPSHOT_POLL_INTERVAL = 0.1
+_NATIVE_SNAPSHOT_MAX_POLLS = 20
+_NATIVE_SNAPSHOT_STABLE_POLLS = 2
+_NATIVE_SNAPSHOT_TAIL_CHARS = 120
 
 
 def _has_insert_indicator(pane_text: str) -> bool:
     """Check if ``-- INSERT --`` appears in the last 3 lines of pane text."""
     return any("-- INSERT --" in line for line in pane_text.splitlines()[-3:])
+
+
+def _normalize_snapshot_text(text: str) -> str:
+    """Collapse whitespace so wrapped terminal lines can be matched reliably."""
+    return " ".join(text.split())
+
+
+def _native_snapshot_tail_target(text: str) -> str | None:
+    normalized = _normalize_snapshot_text(text)
+    if not normalized:
+        return None
+    return normalized[-_NATIVE_SNAPSHOT_TAIL_CHARS:]
 
 
 def notify_vim_insert_seen(window_id: str) -> None:
@@ -681,6 +697,56 @@ class TmuxManager:
             self._pane_send, window_id, "", enter=True, literal=False
         )
 
+    async def _wait_for_native_snapshot_settle(self, window_id: str, text: str) -> None:
+        """Wait until a multiline native paste is visible and stable on screen."""
+        target = _native_snapshot_tail_target(text)
+        if not target:
+            await asyncio.sleep(_LITERAL_SUBMIT_SETTLE_DELAY)
+            return
+
+        stable_matches = 0
+        last_snapshot = ""
+        for _ in range(_NATIVE_SNAPSHOT_MAX_POLLS):
+            rendered = await self._capture_native_snapshot(window_id)
+            normalized = _normalize_snapshot_text(rendered or "")
+            if target in normalized:
+                stable_matches = stable_matches + 1 if normalized == last_snapshot else 1
+                if stable_matches >= _NATIVE_SNAPSHOT_STABLE_POLLS:
+                    return
+            else:
+                stable_matches = 0
+            last_snapshot = normalized
+            await asyncio.sleep(_NATIVE_SNAPSHOT_POLL_INTERVAL)
+
+        await asyncio.sleep(_LITERAL_SUBMIT_SETTLE_DELAY)
+
+    async def _send_native_literal_then_enter(self, window_id: str, text: str) -> bool:
+        """Send text to a native window, waiting for multiline drafts to settle."""
+        sent = send_native_keys(
+            window_id,
+            text,
+            enter=False,
+            literal=True,
+        )
+        if not sent:
+            return False
+
+        if "\n" in text:
+            await self._wait_for_native_snapshot_settle(window_id, text)
+        else:
+            await asyncio.sleep(_LITERAL_SUBMIT_SETTLE_DELAY)
+
+        return send_native_keys(
+            window_id,
+            "Enter",
+            enter=False,
+            literal=False,
+        )
+
+    async def _capture_native_snapshot(self, window_id: str) -> str | None:
+        """Read the latest rendered snapshot for a native session."""
+        return await asyncio.to_thread(capture_native_pane, window_id)
+
     async def send_keys(
         self,
         window_id: str,
@@ -706,21 +772,7 @@ class TmuxManager:
         """
         if is_native_window(window_id):
             if literal and enter and not raw:
-                sent = send_native_keys(
-                    window_id,
-                    text,
-                    enter=False,
-                    literal=True,
-                )
-                if not sent:
-                    return False
-                await asyncio.sleep(_LITERAL_SUBMIT_SETTLE_DELAY)
-                return send_native_keys(
-                    window_id,
-                    "Enter",
-                    enter=False,
-                    literal=False,
-                )
+                return await self._send_native_literal_then_enter(window_id, text)
             return send_native_keys(
                 window_id,
                 text,
