@@ -51,6 +51,11 @@ _vim_locks: dict[str, asyncio.Lock] = {}
 # Delay between sending probe 'i' and recapturing pane (seconds).
 _VIM_PROBE_DELAY = 0.12
 
+# Delay between pasting literal text and submitting with Enter.
+# The TUIs we bridge can treat an immediate Enter as a newline instead
+# of a submit, especially for longer or multiline pastes.
+_LITERAL_SUBMIT_SETTLE_DELAY = 0.5
+
 
 def _has_insert_indicator(pane_text: str) -> bool:
     """Check if ``-- INSERT --`` appears in the last 3 lines of pane text."""
@@ -671,7 +676,7 @@ class TmuxManager:
                 self._pane_send, window_id, text, enter=False, literal=True
             ):
                 return False
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(_LITERAL_SUBMIT_SETTLE_DELAY)
         return await asyncio.to_thread(
             self._pane_send, window_id, "", enter=True, literal=False
         )
@@ -709,7 +714,7 @@ class TmuxManager:
                 )
                 if not sent:
                     return False
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(_LITERAL_SUBMIT_SETTLE_DELAY)
                 return send_native_keys(
                     window_id,
                     "Enter",

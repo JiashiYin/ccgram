@@ -9,7 +9,7 @@ from ccgram.tmux_manager import TmuxManager
 
 class TestNativeSendKeys:
     @pytest.mark.asyncio
-    async def test_native_literal_send_separates_enter(self) -> None:
+    async def test_native_literal_send_separates_enter_after_settle_delay(self) -> None:
         manager = TmuxManager(session_name="test")
 
         with (
@@ -17,7 +17,10 @@ class TestNativeSendKeys:
                 "ccgram.tmux_manager.send_native_keys",
                 side_effect=[True, True],
             ) as mock_send,
-            patch("ccgram.tmux_manager.asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "ccgram.tmux_manager.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
         ):
             result = await manager.send_keys(
                 "native:abc123",
@@ -41,6 +44,7 @@ class TestNativeSendKeys:
                 literal=False,
             ),
         ]
+        mock_sleep.assert_awaited_once_with(0.5)
 
     @pytest.mark.asyncio
     async def test_native_literal_send_returns_false_if_enter_submit_fails(self) -> None:
