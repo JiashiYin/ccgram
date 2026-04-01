@@ -482,6 +482,38 @@ async def _wait_for_shell_ready(window_id: str, *, attempts: int = 5) -> None:
         await asyncio.sleep(0.2)
 
 
+async def _wait_for_hookless_session_ready(
+    window_id: str,
+    provider_name: str,
+    *,
+    attempts: int = 8,
+    interval: float = 0.3,
+) -> bool:
+    """Wait for a hookless provider to expose a transcript-backed session.
+
+    Fresh Codex/Gemini launches briefly sit in a plain shell-looking startup state.
+    During that window, forwarding text would be interpreted by the shell instead of
+    the agent TUI. Treat the session as ready only after transcript discovery has
+    attached a session id or transcript path.
+    """
+    provider = provider_registry.get(provider_name)
+    if provider_name == "shell" or provider.capabilities.supports_hook:
+        return True
+
+    from .status_polling import _maybe_discover_transcript
+
+    for _ in range(attempts):
+        state = session_manager.get_window_state(window_id)
+        if state.session_id or state.transcript_path:
+            return True
+        await _maybe_discover_transcript(window_id)
+        state = session_manager.get_window_state(window_id)
+        if state.session_id or state.transcript_path:
+            return True
+        await asyncio.sleep(interval)
+    return False
+
+
 async def _create_window_and_bind(
     query: CallbackQuery,
     user_id: int,
@@ -570,15 +602,28 @@ async def _create_window_and_bind(
         context.user_data.get(PENDING_THREAD_TEXT) if context.user_data else None
     )
     if pending_text:
+        if context.user_data is not None:
+            context.user_data.pop(PENDING_THREAD_TEXT, None)
+            context.user_data.pop(PENDING_THREAD_ID, None)
+
+        hookless_ready = await _wait_for_hookless_session_ready(
+            created_wid, provider_name
+        )
+        if not hookless_ready:
+            await safe_send(
+                context.bot,
+                session_manager.resolve_chat_id(user_id, pending_thread_id),
+                f"⏳ {provider_name.title()} is still starting in this topic. "
+                "Send your message again in a moment.",
+                message_thread_id=pending_thread_id,
+            )
+            return
+
         logger.debug(
             "Forwarding pending text to window %s (len=%d)",
             created_wname,
             len(pending_text),
         )
-        if context.user_data is not None:
-            context.user_data.pop(PENDING_THREAD_TEXT, None)
-            context.user_data.pop(PENDING_THREAD_ID, None)
-
         # Shell provider: route through NL→command approval flow
         if provider_name == "shell":
             from .shell_commands import handle_shell_message

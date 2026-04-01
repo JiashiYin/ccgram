@@ -298,7 +298,7 @@ class TestStartupTimeout:
             _window_poll_state.get("@0") is None
             or _window_poll_state["@0"].startup_time is None
         )
-        mock_emoji.assert_called_once_with(bot, -100, 42, "idle", "project")
+        mock_emoji.assert_called_once_with(bot, -100, 42, "active", "project")
 
     async def test_startup_grace_period_sends_typing(self) -> None:
         from ccgram.handlers.status_polling import _handle_no_status
@@ -759,6 +759,18 @@ class TestTransitionToIdle:
         assert mock_enqueue.call_args[0][3] == IDLE_STATUS_TEXT
         assert mock_enqueue.call_args[1]["thread_id"] == 42
 
+    async def test_keeps_topic_green_for_generic_idle(self) -> None:
+        from ccgram.handlers.status_polling import _transition_to_idle
+
+        bot = AsyncMock(spec=Bot)
+        with (
+            patch("ccgram.handlers.status_polling.update_topic_emoji") as mock_emoji,
+            patch("ccgram.handlers.status_polling.enqueue_status_update"),
+        ):
+            await _transition_to_idle(bot, 1, "@0", 42, -100, "project", "normal")
+
+        mock_emoji.assert_called_once_with(bot, -100, 42, "active", "project")
+
     @pytest.mark.parametrize("mode", ["notify", "muted", "errors_only"])
     async def test_suppressed_mode_clears_status_no_timer(self, mode: str) -> None:
         from ccgram.handlers.status_polling import _transition_to_idle
@@ -1064,6 +1076,45 @@ class TestProviderSwitchPromptSetup:
 
         mock_sm.set_window_provider.assert_called_once_with("@7", "shell", cwd="/proj")
         mock_setup.assert_awaited_once_with("@7", clear=False)
+
+    async def test_preserves_explicit_hookless_provider_during_shell_startup(
+        self,
+    ) -> None:
+        from ccgram.handlers.status_polling import _maybe_discover_transcript
+
+        mock_provider = MagicMock()
+        mock_provider.capabilities.supports_hook = False
+        mock_provider.capabilities.name = "codex"
+        mock_provider.discover_transcript.return_value = None
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccgram.handlers.status_polling.tmux_manager") as mock_tmux,
+            patch(
+                "ccgram.handlers.status_polling.detect_provider_from_pane",
+                new_callable=AsyncMock,
+                return_value="shell",
+            ),
+            patch(
+                "ccgram.handlers.status_polling.get_provider_for_window",
+                return_value=mock_provider,
+            ),
+        ):
+            mock_sm.window_states = {
+                "@7": MagicMock(
+                    session_id="",
+                    cwd="/proj",
+                    provider_name="codex",
+                    transcript_path="",
+                )
+            }
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(pane_current_command="bash", cwd="/proj")
+            )
+            mock_tmux.get_pane_title = AsyncMock(return_value="")
+            await _maybe_discover_transcript("@7")
+
+        mock_sm.set_window_provider.assert_not_called()
 
     async def test_switch_to_claude_does_not_offer_prompt_setup(self) -> None:
         from ccgram.handlers.status_polling import _maybe_discover_transcript

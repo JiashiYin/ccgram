@@ -13,7 +13,7 @@ CCGram supports multiple agent CLI backends. Each Telegram topic can use a diffe
 
 ## Choosing a Provider
 
-**From Telegram**: When you create a new topic and select a directory, a provider picker appears with Claude (default), Codex, Gemini, and Shell options. After provider selection, CCGram asks for session mode:
+**From Telegram**: When you create a new topic, CCGram opens the directory browser immediately. After you select a directory, a provider picker appears with Claude (default), Codex, Gemini, and Shell options. After provider selection, CCGram asks for session mode:
 
 - `✅ Standard` (normal approvals)
 - `🚀 YOLO` (provider-specific permissive mode)
@@ -33,6 +33,8 @@ CCGram stores mode per window and reuses it for recover/continue/resume flows.
   - Gemini: `--yolo`
 
 YOLO sessions are indicated in Telegram topic titles with a `🚀` badge and in `/sessions` with a `[YOLO]` tag. When Remote Control is active, a `📡` badge also appears in the topic title.
+
+For live topics, the standard green activity badge stays stable through ordinary startup and idle gaps. CCGram avoids flipping long-running sessions to yellow just because a provider paused briefly between transcript updates.
 
 ## Custom Launch Commands
 

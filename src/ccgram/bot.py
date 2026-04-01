@@ -171,7 +171,7 @@ from .handlers.status_polling import (
 )
 from .handlers.file_handler import handle_document_message, handle_photo_message
 from .handlers.voice_handler import handle_voice_message
-from .handlers.text_handler import handle_text_message
+from .handlers.text_handler import _handle_unbound_topic, handle_text_message
 from .session import AuditIssue, session_manager
 from .session_monitor import NewMessage, NewWindowEvent, SessionMonitor
 from .telegram_request import ResilientPollingHTTPXRequest
@@ -739,6 +739,29 @@ async def topic_closed_handler(
         logger.debug(
             "Topic closed: no binding (user=%d, thread=%d)", user.id, thread_id
         )
+
+
+async def topic_created_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Prompt unbound topics immediately after manual Telegram topic creation."""
+    user = update.effective_user
+    if not user or not is_user_allowed(user.id):
+        return
+    if not update.message or not update.message.forum_topic_created:
+        return
+
+    thread_id = _get_thread_id(update)
+    if thread_id is None:
+        return
+
+    await _handle_unbound_topic(
+        user.id,
+        thread_id,
+        "",
+        context.user_data,
+        update.message,
+    )
 
 
 async def topic_edited_handler(
@@ -2087,6 +2110,12 @@ def create_bot() -> Application:
         MessageHandler(
             filters.StatusUpdate.FORUM_TOPIC_CLOSED & _group_filter,
             topic_closed_handler,
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.FORUM_TOPIC_CREATED & _group_filter,
+            topic_created_handler,
         )
     )
     # Topic renamed event — sync name to tmux window

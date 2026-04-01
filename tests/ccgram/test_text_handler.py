@@ -584,6 +584,59 @@ class TestHandleTextMessageTargeting:
 
         mock_sm.send_to_window.assert_called_once_with("@0", "hello")
 
+    @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
+    @patch(f"{_TH}.get_provider_for_window")
+    @patch(f"{_TH}._handle_dead_window", new_callable=AsyncMock, return_value=False)
+    @patch(f"{_TH}.session_manager")
+    async def test_hookless_provider_without_session_replies_starting(
+        self,
+        mock_sm: MagicMock,
+        _mock_dead: AsyncMock,
+        mock_get_provider: MagicMock,
+        mock_reply: AsyncMock,
+    ) -> None:
+        mock_sm.get_window_for_thread.return_value = "@0"
+        mock_sm.get_window_state.return_value = MagicMock(
+            session_id="",
+            transcript_path="",
+            provider_name="codex",
+        )
+        mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+        provider = MagicMock()
+        provider.capabilities.name = "codex"
+        provider.capabilities.supports_hook = False
+        mock_get_provider.return_value = provider
+
+        with patch(
+            "ccgram.handlers.text_handler._maybe_discover_transcript",
+            new_callable=AsyncMock,
+        ) as mock_discover:
+            from ccgram.handlers.text_handler import handle_text_message
+
+            update = MagicMock()
+            context = MagicMock()
+            context.bot = AsyncMock()
+            context.user_data = {}
+            message = MagicMock()
+            message.chat = MagicMock()
+            message.chat.send_action = AsyncMock()
+            message.message_thread_id = 42
+            message.text = "hello"
+            message.entities = []
+            message.chat.type = "supergroup"
+            message.get_bot.return_value = MagicMock(username="MyBot", id=123)
+            update.message = message
+            update.effective_user = MagicMock()
+            update.effective_user.id = 100
+
+            await handle_text_message(update, context)
+
+        mock_discover.assert_awaited_once_with("@0")
+        mock_sm.send_to_window.assert_not_called()
+        mock_reply.assert_called_once()
+        assert "still starting" in mock_reply.call_args.args[1].lower()
+
 
 class TestBashCaptureCleanup:
     @pytest.fixture(autouse=True)

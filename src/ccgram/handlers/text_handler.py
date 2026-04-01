@@ -37,7 +37,7 @@ from .message_sender import (
     safe_reply,
 )
 from .recovery_callbacks import build_recovery_keyboard
-from .status_polling import clear_probe_failures
+from .status_polling import clear_probe_failures, _maybe_discover_transcript
 from .topic_emoji import update_stored_topic_name
 from .topic_routing import (
     classify_topic_routing,
@@ -57,6 +57,20 @@ _BASH_OUTPUT_LIMIT = 3800
 
 # Active bash capture tasks: (user_id, thread_id) -> asyncio.Task
 _bash_capture_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+
+
+async def _ensure_hookless_session_ready(window_id: str) -> bool:
+    """Return whether a bound hookless agent session is ready to receive text."""
+    state = session_manager.get_window_state(window_id)
+    provider = get_provider_for_window(window_id)
+    if provider.capabilities.supports_hook or provider.capabilities.name == "shell":
+        return True
+    if state.session_id or state.transcript_path:
+        return True
+
+    await _maybe_discover_transcript(window_id)
+    state = session_manager.get_window_state(window_id)
+    return bool(state.session_id or state.transcript_path)
 
 
 def _resolve_targeted_text(message: Message) -> str | None:
@@ -515,6 +529,14 @@ async def handle_text_message(
 
     # Shell provider: route through LLM or raw execution
     provider = get_provider_for_window(window_id)
+    if not await _ensure_hookless_session_ready(window_id):
+        await safe_reply(
+            message,
+            f"⏳ {provider.capabilities.name.title()} is still starting in this topic. "
+            "Try again in a moment.",
+        )
+        return
+
     if provider.capabilities.name == "shell":
         from .shell_commands import handle_shell_message
 

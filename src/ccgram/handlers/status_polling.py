@@ -580,7 +580,9 @@ async def _transition_to_idle(
     ws = _get_window_state(window_id)
     ws.startup_time = None
     ws.missing_polls = 0
-    await update_topic_emoji(bot, chat_id, thread_id, "idle", display)
+    # Keep live sessions green during ordinary idle gaps. Yellow should be
+    # reserved for genuinely attention-seeking states, not brief inactivity.
+    await update_topic_emoji(bot, chat_id, thread_id, "active", display)
     _clear_autoclose_if_active(user_id, thread_id)
     _get_topic_state(user_id, thread_id).last_typing_sent = None
     if notif_mode not in ("notify", "muted", "errors_only"):
@@ -1290,7 +1292,21 @@ async def _maybe_discover_transcript(
             )
         if detected and detected != state.provider_name:
             old_provider = state.provider_name
-            session_manager.set_window_provider(window_id, detected, cwd=w.cwd or None)
+            preserve_hookless_startup = False
+            if detected == "shell" and state.provider_name:
+                current_provider = get_provider_for_window(window_id)
+                preserve_hookless_startup = (
+                    not current_provider.capabilities.supports_hook
+                    and current_provider.capabilities.name != "shell"
+                    and not state.session_id
+                    and not state.transcript_path
+                )
+            if preserve_hookless_startup:
+                detected = state.provider_name
+            else:
+                session_manager.set_window_provider(
+                    window_id, detected, cwd=w.cwd or None
+                )
             if detected == "shell":
                 state.transcript_path = ""  # shell has no transcripts
                 from ..providers.shell import setup_shell_prompt

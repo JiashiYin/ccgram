@@ -9,7 +9,11 @@ from ccgram.handlers.recovery_callbacks import _create_and_bind_window
 from ccgram.handlers.resume_command import _create_resume_window
 from ccgram.handlers.restore_command import restore_command
 from ccgram.handlers.window_callbacks import _handle_bind
-from ccgram.handlers.user_state import PENDING_THREAD_ID, RECOVERY_WINDOW_ID
+from ccgram.handlers.user_state import (
+    PENDING_THREAD_ID,
+    PENDING_THREAD_TEXT,
+    RECOVERY_WINDOW_ID,
+)
 from ccgram.session_monitor import NewMessage
 from ccgram.session import WindowState
 
@@ -42,6 +46,11 @@ class TestTelegramCreatedFlowsStayInteractive:
             patch("ccgram.handlers.directory_callbacks.provider_registry") as mock_pr,
             patch("ccgram.handlers.directory_callbacks.safe_edit"),
             patch("ccgram.handlers.directory_callbacks._wait_for_shell_ready"),
+            patch(
+                "ccgram.handlers.directory_callbacks._wait_for_hookless_session_ready",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
         ):
             mock_tm.create_window = AsyncMock(
                 return_value=(True, "Created", "topic", "@10")
@@ -61,6 +70,46 @@ class TestTelegramCreatedFlowsStayInteractive:
             )
 
         mock_sm.set_notification_mode.assert_called_once_with("@10", "interactive")
+
+    async def test_directory_create_window_skips_pending_text_until_hookless_ready(
+        self,
+    ) -> None:
+        query = _make_query()
+        context = _make_context({PENDING_THREAD_ID: 42, PENDING_THREAD_TEXT: "hello"})
+
+        with (
+            patch("ccgram.handlers.directory_callbacks.tmux_manager") as mock_tm,
+            patch("ccgram.handlers.directory_callbacks.session_manager") as mock_sm,
+            patch("ccgram.handlers.directory_callbacks.provider_registry") as mock_pr,
+            patch("ccgram.handlers.directory_callbacks.safe_edit"),
+            patch("ccgram.handlers.directory_callbacks.safe_send") as mock_send,
+            patch("ccgram.handlers.directory_callbacks._wait_for_shell_ready"),
+            patch(
+                "ccgram.handlers.directory_callbacks._wait_for_hookless_session_ready",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            mock_tm.create_window = AsyncMock(
+                return_value=(True, "Created", "topic", "@10")
+            )
+            mock_tm.stamp_pane_title = AsyncMock()
+            mock_pr.get.return_value.capabilities.supports_hook = False
+            mock_sm.get_window_state.return_value = MagicMock(cwd="")
+            mock_sm.get_approval_mode.return_value = "normal"
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            await _create_window_and_bind(
+                query,
+                100,
+                "/tmp/project",
+                "codex",
+                "normal",
+                context,
+            )
+
+        mock_sm.send_to_window.assert_not_called()
+        assert "still starting" in mock_send.call_args.args[2].lower()
 
     async def test_window_rebind_sets_interactive_mode(self) -> None:
         query = _make_query()

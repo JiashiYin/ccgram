@@ -81,6 +81,7 @@ Each Telegram Forum topic binds to one tmux window running an agent CLI. Message
 - Voice message transcription via Whisper API (OpenAI, Groq) with confirm/discard keyboard
 - Sessions dashboard (`/sessions`) — overview of all sessions with status and kill buttons
 - Remote Control detection — 📡 topic badge when RC is active, one-tap activation from status keyboard
+- Topic state badges stay stable — live sessions stay 🟢 during ordinary idle gaps; noisy 🟡 churn is reserved for attention-needed states instead of harmless pauses
 - Action toolbar (`/toolbar`) — persistent inline buttons for RC, Screenshot, Esc, Notify, Ctrl-C
 
 **Real-time monitoring**
@@ -216,7 +217,7 @@ See **[docs/providers.md](docs/providers.md#llm-configuration)** for all options
 ccgram
 ```
 
-Open your Telegram group, create a new topic, send a message — a directory browser appears. Pick a project directory, choose your agent (Claude, Codex, Gemini, or Shell), then choose session mode (`✅ Standard` or `🚀 YOLO`), and you're connected.
+Open your Telegram group and create a new topic — the directory browser appears immediately. Pick a project directory, choose your agent (Claude, Codex, Gemini, or Shell), then choose session mode (`✅ Standard` or `🚀 YOLO`), and you're connected. If the provider is still booting, CCGram now tells you that directly instead of sending your first message into a raw shell.
 
 ### Everyday Notify Workflow
 
