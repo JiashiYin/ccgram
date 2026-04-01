@@ -65,6 +65,23 @@ def _notify_kind_from_phase(phase: Any) -> str | None:
     return None
 
 
+def _is_subagent_notification_text(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("<subagent_notification>") and stripped.endswith(
+        "</subagent_notification>"
+    )
+
+
+def _is_subagent_session_meta(meta: dict[str, Any]) -> bool:
+    source = meta.get("source")
+    if not isinstance(source, dict):
+        return False
+    subagent = source.get("subagent")
+    if not isinstance(subagent, dict):
+        return False
+    return isinstance(subagent.get("thread_spawn"), dict)
+
+
 def _format_codex_tool_result(raw_tool_name: str, output_text: str) -> str:
     """Format a Codex tool result with stats summary and expandable quote.
 
@@ -431,6 +448,8 @@ def _parse_response_message(
     text = _extract_text_blocks(payload.get("content", ""))
     if not text:
         return [], pending
+    if role == "user" and _is_subagent_notification_text(text):
+        return [], pending
     phase = payload.get("phase")
     notify_kind = _notify_kind_from_phase(phase)
     return (
@@ -483,6 +502,8 @@ def _parse_input_item(
         return [], pending
     content = payload.get("content", "")
     if not isinstance(content, str) or not content:
+        return [], pending
+    if _is_subagent_notification_text(content):
         return [], pending
     return ([AgentMessage(text=content, role="user", content_type="text")], pending)
 
@@ -673,8 +694,15 @@ class CodexProvider(JsonlProvider):
                         text = block.get("text", "")
                         if text.startswith(("<permissions", "<environment_context")):
                             return False
+                        if _is_subagent_notification_text(text):
+                            return False
             return True
-        return entry_type == "input_item" and payload.get("role") == "user"
+        if entry_type == "input_item" and payload.get("role") == "user":
+            content = payload.get("content", "")
+            return not (
+                isinstance(content, str) and _is_subagent_notification_text(content)
+            )
+        return False
 
     def parse_history_entry(self, entry: dict[str, Any]) -> AgentMessage | None:
         """Parse a single Codex transcript entry for history display."""
@@ -682,6 +710,8 @@ class CodexProvider(JsonlProvider):
         payload = entry.get("payload", {})
         if not isinstance(payload, dict):
             return None
+
+        message: AgentMessage | None = None
 
         if entry_type == "response_item":
             role = payload.get("role", "")
@@ -691,19 +721,23 @@ class CodexProvider(JsonlProvider):
             text = _extract_text_blocks(content)
             if not text:
                 return None
-            return AgentMessage(
+            if role == "user" and _is_subagent_notification_text(text):
+                return None
+            message = AgentMessage(
                 text=text,
                 role=cast(MessageRole, role),
                 content_type="text",
             )
-        if entry_type == "input_item" and payload.get("role") == "user":
+        elif entry_type == "input_item" and payload.get("role") == "user":
             content = payload.get("content", "")
             text = content if isinstance(content, str) else ""
             if not text:
                 return None
-            return AgentMessage(text=text, role="user", content_type="text")
+            if _is_subagent_notification_text(text):
+                return None
+            message = AgentMessage(text=text, role="user", content_type="text")
 
-        return None
+        return message
 
     def parse_terminal_status(
         self,
@@ -758,6 +792,8 @@ class CodexProvider(JsonlProvider):
                 break  # sorted newest-first; remaining are all older
             meta = _read_codex_session_meta(fpath)
             if not meta:
+                continue
+            if _is_subagent_session_meta(meta):
                 continue
             file_cwd = meta.get("cwd", "")
             if file_cwd and str(Path(file_cwd).resolve()) == resolved_cwd:

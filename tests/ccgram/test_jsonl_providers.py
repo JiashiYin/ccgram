@@ -160,6 +160,35 @@ class TestCodexTranscriptParsing:
         assert messages[0].text == "what is this?"
         assert messages[0].role == "user"
 
+    def test_ignores_subagent_notification_user_messages(self) -> None:
+        codex = CodexProvider()
+        entries = [
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "<subagent_notification>\n{\"agent_path\":\"sub-1\"}\n</subagent_notification>",
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "input_item",
+                "payload": {
+                    "role": "user",
+                    "content": "<subagent_notification>\n{\"agent_path\":\"sub-1\"}\n</subagent_notification>",
+                },
+            },
+        ]
+
+        messages, _ = codex.parse_transcript_entries(entries, {})
+
+        assert messages == []
+
     def test_parses_event_agent_message(self) -> None:
         codex = CodexProvider()
         entries = [
@@ -351,6 +380,22 @@ class TestCodexTranscriptParsing:
                 "role": "user",
                 "content": [
                     {"type": "input_text", "text": "<permissions>...</permissions>"}
+                ],
+            },
+        }
+        assert codex.is_user_transcript_entry(entry) is False
+
+    def test_is_user_entry_skips_subagent_notification(self) -> None:
+        codex = CodexProvider()
+        entry = {
+            "type": "response_item",
+            "payload": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<subagent_notification>\n{\"agent_path\":\"sub-1\"}\n</subagent_notification>",
+                    }
                 ],
             },
         }
@@ -1377,13 +1422,22 @@ def _write_gemini_session(
 
 
 def _write_codex_session(
-    sessions_dir: Path, date_parts: str, name: str, session_id: str, cwd: str
+    sessions_dir: Path,
+    date_parts: str,
+    name: str,
+    session_id: str,
+    cwd: str,
+    *,
+    source: dict[str, object] | None = None,
 ) -> Path:
     """Write a minimal Codex transcript file and return its path."""
     day_dir = sessions_dir / date_parts
     day_dir.mkdir(parents=True, exist_ok=True)
     fpath = day_dir / f"{name}.jsonl"
-    meta = {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}
+    payload: dict[str, object] = {"id": session_id, "cwd": cwd}
+    if source is not None:
+        payload["source"] = source
+    meta = {"type": "session_meta", "payload": payload}
     fpath.write_text(json.dumps(meta) + "\n")
     return fpath
 
@@ -1438,6 +1492,34 @@ class TestCodexDiscoverTranscript:
             event = codex.discover_transcript("/my/project", "ccgram:@7")
         assert event is not None
         assert event.session_id == "uuid-new"
+
+    def test_skips_newer_subagent_transcript_with_same_cwd(self, tmp_path: Path) -> None:
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        _write_codex_session(
+            sessions_dir, "2026/03/01", "parent", "uuid-parent", "/my/project"
+        )
+        time.sleep(0.05)
+        _write_codex_session(
+            sessions_dir,
+            "2026/03/02",
+            "subagent",
+            "uuid-subagent",
+            "/my/project",
+            source={
+                "subagent": {
+                    "thread_spawn": {
+                        "parent_thread_id": "uuid-parent",
+                        "depth": 1,
+                    }
+                }
+            },
+        )
+
+        codex = CodexProvider()
+        with patch.object(Path, "home", return_value=tmp_path):
+            event = codex.discover_transcript("/my/project", "ccgram:@7")
+        assert event is not None
+        assert event.session_id == "uuid-parent"
 
     def test_skips_non_session_meta_first_line(self, tmp_path: Path) -> None:
         sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "03" / "02"
