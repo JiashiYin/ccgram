@@ -174,6 +174,7 @@ def register_native_session(
     columns: int,
     rows: int,
     pid: int,
+    process_group_id: int | None = None,
 ) -> None:
     """Persist a newly launched native session."""
     data = _load_registry()
@@ -191,6 +192,7 @@ def register_native_session(
         "columns": columns,
         "rows": rows,
         "pid": pid,
+        "process_group_id": process_group_id if process_group_id is not None else pid,
         "bridge_pid": os.getpid(),
         "running": True,
         "started_at": time.time(),
@@ -242,6 +244,25 @@ def mark_native_session_exited(
     )
 
 
+def _kill_native_process_group(record: dict[str, Any]) -> None:
+    """Best-effort reap of a stale detached native-session process group."""
+    pgid = record.get("process_group_id")
+    if not isinstance(pgid, int) or pgid <= 0:
+        pid = record.get("pid")
+        pgid = pid if isinstance(pid, int) and pid > 0 else None
+    if pgid is None:
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError:
+        pid = record.get("pid")
+        if isinstance(pid, int) and pid > 0:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
 def remove_native_session(window_id: str) -> None:
     """Remove a native session from the registry and delete its socket file."""
     data = _load_registry()
@@ -288,6 +309,7 @@ def list_native_windows(
             )
             or not _has_live_control_channel(record, now=ts)
         ):
+            _kill_native_process_group(record)
             mark_native_session_exited(window_id, exit_code=-1, ended_at=ts)
             record["running"] = False
             record["ended_at"] = ts
@@ -666,6 +688,7 @@ def run_native_notify_session(
         columns=columns,
         rows=rows,
         pid=child.pid,
+        process_group_id=child.pid,
     )
     update_native_snapshot(
         window_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -308,12 +309,14 @@ def test_list_native_windows_marks_stale_control_socket_exited(
             "ccgram.native_sessions._control_socket_accepts_connections",
             return_value=False,
         ),
+        patch("ccgram.native_sessions.os.killpg") as killpg,
     ):
         assert list_native_windows(now=10.0) == []
 
     registry = json.loads((tmp_path / "native-sessions.json").read_text())
     record = registry["sessions"][window_id]
     assert record["running"] is False
+    killpg.assert_called_once_with(999, signal.SIGKILL)
 
 
 def test_list_native_windows_marks_missing_bridge_process_exited(
@@ -344,9 +347,11 @@ def test_list_native_windows_marks_missing_bridge_process_exited(
     with (
         patch("ccgram.native_sessions._pid_is_running", side_effect=_pid_side_effect),
         patch("ccgram.native_sessions._has_live_control_channel", return_value=True),
+        patch("ccgram.native_sessions.os.killpg") as killpg,
     ):
         assert list_native_windows(now=10.0) == []
 
     registry = json.loads((tmp_path / "native-sessions.json").read_text())
     record = registry["sessions"][window_id]
     assert record["running"] is False
+    killpg.assert_called_once_with(999, signal.SIGKILL)

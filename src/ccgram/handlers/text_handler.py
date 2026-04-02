@@ -44,7 +44,12 @@ from .topic_routing import (
     format_topic_name_with_default_responder,
     leading_bot_target,
 )
-from .user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT, RECOVERY_WINDOW_ID
+from .user_state import (
+    PENDING_THREAD_ID,
+    PENDING_THREAD_TEXT,
+    PENDING_TOPIC_DEFAULT_BOT,
+    RECOVERY_WINDOW_ID,
+)
 from ..session import session_manager
 from ..providers import get_provider_for_window
 from ..tmux_manager import tmux_manager
@@ -208,6 +213,7 @@ async def _check_ui_guards(
         clear_window_picker_state(user_data)
         user_data.pop(PENDING_THREAD_ID, None)
         user_data.pop(PENDING_THREAD_TEXT, None)
+        user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
 
     # Directory browser guard
     if user_data.get(STATE_KEY) == STATE_BROWSING_DIRECTORY:
@@ -222,6 +228,7 @@ async def _check_ui_guards(
         clear_browse_state(user_data)
         user_data.pop(PENDING_THREAD_ID, None)
         user_data.pop(PENDING_THREAD_TEXT, None)
+        user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
 
     return False
 
@@ -240,6 +247,28 @@ async def _handle_unbound_topic(
     window_id = session_manager.get_window_for_thread(user_id, thread_id)
     if window_id is not None:
         return False
+
+    bot_username = getattr(message.get_bot(), "username", None)
+    explicit_self_target = leading_bot_target(message) is not None
+    decision, should_claim_default = await classify_topic_routing(
+        bot=message.get_bot(),
+        chat_id=message.chat.id,
+        display_name="",
+        bot_username=bot_username,
+        explicit_self_target=explicit_self_target,
+    )
+    if decision == "ignore":
+        return True
+    if decision == "prompt":
+        await safe_reply(
+            message,
+            "Multiple bots are available in this topic. Start by addressing one explicitly, "
+            f"for example `@{bot_username} ...`. Once a bot is addressed explicitly, this "
+            "topic will remember it as the default responder.",
+        )
+        return True
+    if should_claim_default and user_data is not None and bot_username:
+        user_data[PENDING_TOPIC_DEFAULT_BOT] = bot_username
 
     all_windows = await tmux_manager.list_windows()
     external_windows = await tmux_manager.discover_external_sessions()
@@ -477,7 +506,7 @@ async def _gate_topic_targeting(
     return False, bot_username, claim_default
 
 
-async def handle_text_message(
+async def handle_text_message(  # noqa: C901
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Orchestrate text message handling via bool early-return chain.

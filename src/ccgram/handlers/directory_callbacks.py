@@ -50,8 +50,13 @@ from .directory_browser import (
     get_favorites,
 )
 from .message_sender import safe_edit, safe_send
-from .topic_emoji import format_topic_name_for_mode
-from .user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT
+from .topic_emoji import format_topic_name_for_mode, update_stored_topic_name
+from .topic_routing import format_topic_name_with_default_responder
+from .user_state import (
+    PENDING_THREAD_ID,
+    PENDING_THREAD_TEXT,
+    PENDING_TOPIC_DEFAULT_BOT,
+)
 
 logger = structlog.get_logger()
 
@@ -349,6 +354,7 @@ async def _handle_confirm(
         if context.user_data is not None:
             context.user_data.pop(PENDING_THREAD_ID, None)
             context.user_data.pop(PENDING_THREAD_TEXT, None)
+            context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
         await query.answer("Stale browser (topic mismatch)", show_alert=True)
         return
 
@@ -440,7 +446,6 @@ async def _handle_provider_select(
     pending_thread_id: int | None = (
         context.user_data.get(PENDING_THREAD_ID) if context.user_data else None
     )
-
     if not await _validate_provider_select(
         query, user_id, update, context, pending_thread_id
     ):
@@ -514,7 +519,7 @@ async def _wait_for_hookless_session_ready(
     return False
 
 
-async def _create_window_and_bind(
+async def _create_window_and_bind(  # noqa: PLR0912, PLR0915
     query: CallbackQuery,
     user_id: int,
     selected_path: str,
@@ -532,6 +537,9 @@ async def _create_window_and_bind(
     pending_thread_id: int | None = (
         context.user_data.get(PENDING_THREAD_ID) if context.user_data else None
     )
+    pending_default_bot: str | None = (
+        context.user_data.get(PENDING_TOPIC_DEFAULT_BOT) if context.user_data else None
+    )
 
     launch_command = resolve_launch_command(provider_name, approval_mode=approval_mode)
 
@@ -543,6 +551,7 @@ async def _create_window_and_bind(
         if pending_thread_id is not None and context.user_data is not None:
             context.user_data.pop(PENDING_THREAD_ID, None)
             context.user_data.pop(PENDING_THREAD_TEXT, None)
+            context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
         return
 
     session_manager.update_user_mru(user_id, selected_path)
@@ -584,11 +593,20 @@ async def _create_window_and_bind(
     if chat and chat.type in ("group", "supergroup"):
         session_manager.set_group_chat_id(user_id, pending_thread_id, chat.id)
 
+    clean_topic_name = created_wname
+    if pending_default_bot:
+        clean_topic_name = format_topic_name_with_default_responder(
+            clean_topic_name, pending_default_bot
+        )
+        session_manager.set_display_name(created_wid, clean_topic_name)
+        if chat:
+            update_stored_topic_name(chat.id, pending_thread_id, clean_topic_name)
+
     try:
         await context.bot.edit_forum_topic(
             chat_id=session_manager.resolve_chat_id(user_id, pending_thread_id),
             message_thread_id=pending_thread_id,
-            name=format_topic_name_for_mode(created_wname, approval_mode),
+            name=format_topic_name_for_mode(clean_topic_name, approval_mode),
         )
     except TelegramError as e:
         logger.debug("Failed to rename topic: %s", e)
@@ -605,6 +623,7 @@ async def _create_window_and_bind(
         if context.user_data is not None:
             context.user_data.pop(PENDING_THREAD_TEXT, None)
             context.user_data.pop(PENDING_THREAD_ID, None)
+            context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
 
         hookless_ready = await _wait_for_hookless_session_ready(
             created_wid, provider_name
@@ -650,6 +669,7 @@ async def _create_window_and_bind(
                 )
     elif context.user_data is not None:
         context.user_data.pop(PENDING_THREAD_ID, None)
+        context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
 
 
 async def _handle_mode_select(
@@ -711,5 +731,6 @@ async def _handle_cancel(
     if context.user_data is not None:
         context.user_data.pop(PENDING_THREAD_ID, None)
         context.user_data.pop(PENDING_THREAD_TEXT, None)
+        context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
     await safe_edit(query, "Cancelled")
     await query.answer("Cancelled")

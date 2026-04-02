@@ -30,8 +30,13 @@ from .directory_browser import (
     clear_window_picker_state,
 )
 from .message_sender import safe_edit, safe_send
-from .topic_emoji import format_topic_name_for_mode
-from .user_state import PENDING_THREAD_ID, PENDING_THREAD_TEXT
+from .topic_emoji import format_topic_name_for_mode, update_stored_topic_name
+from .topic_routing import format_topic_name_with_default_responder
+from .user_state import (
+    PENDING_THREAD_ID,
+    PENDING_THREAD_TEXT,
+    PENDING_TOPIC_DEFAULT_BOT,
+)
 
 logger = structlog.get_logger()
 
@@ -185,6 +190,21 @@ async def _handle_bind(
     session_manager.bind_thread(user_id, thread_id, selected_wid, window_name=display)
     session_manager.set_notification_mode(selected_wid, "interactive")
     _store_group_chat_id(user_id, thread_id, update, query)
+    pending_default_bot: str | None = (
+        context.user_data.get(PENDING_TOPIC_DEFAULT_BOT) if context.user_data else None
+    )
+
+    clean_topic_name = display
+    if pending_default_bot:
+        clean_topic_name = format_topic_name_with_default_responder(
+            clean_topic_name, pending_default_bot
+        )
+        session_manager.set_display_name(selected_wid, clean_topic_name)
+        update_stored_topic_name(
+            session_manager.resolve_chat_id(user_id, thread_id),
+            thread_id,
+            clean_topic_name,
+        )
 
     detected = await _detect_and_setup_provider(
         selected_wid,
@@ -200,7 +220,7 @@ async def _handle_bind(
             chat_id=session_manager.resolve_chat_id(user_id, thread_id),
             message_thread_id=thread_id,
             name=format_topic_name_for_mode(
-                display, session_manager.get_approval_mode(selected_wid)
+                clean_topic_name, session_manager.get_approval_mode(selected_wid)
             ),
         )
     except TelegramError as e:
@@ -217,6 +237,7 @@ async def _handle_bind(
     if context.user_data is not None:
         context.user_data.pop(PENDING_THREAD_TEXT, None)
         context.user_data.pop(PENDING_THREAD_ID, None)
+        context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
     if pending_text:
         await _forward_pending_text(
             context.bot,
@@ -271,5 +292,6 @@ async def _handle_cancel(
     if context.user_data is not None:
         context.user_data.pop(PENDING_THREAD_ID, None)
         context.user_data.pop(PENDING_THREAD_TEXT, None)
+        context.user_data.pop(PENDING_TOPIC_DEFAULT_BOT, None)
     await safe_edit(query, "Cancelled")
     await query.answer("Cancelled")

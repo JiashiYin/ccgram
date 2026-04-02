@@ -6,6 +6,7 @@ to prevent typos and enable IDE navigation.
 
 PENDING_THREAD_ID = "_pending_thread_id"
 PENDING_THREAD_TEXT = "_pending_thread_text"
+PENDING_TOPIC_DEFAULT_BOT = "_pending_topic_default_bot"
 RECOVERY_WINDOW_ID = "_recovery_window_id"
 RECOVERY_SESSIONS = "_recovery_sessions"
 RESUME_SESSIONS = "_resume_sessions"

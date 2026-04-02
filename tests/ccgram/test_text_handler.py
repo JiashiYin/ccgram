@@ -20,6 +20,7 @@ from ccgram.handlers.directory_browser import (
 from ccgram.handlers.user_state import (
     PENDING_THREAD_ID,
     PENDING_THREAD_TEXT,
+    PENDING_TOPIC_DEFAULT_BOT,
     RECOVERY_WINDOW_ID,
 )
 
@@ -138,23 +139,28 @@ class TestHandleUnboundTopic:
 
     @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
     @patch(f"{_TH}.build_directory_browser")
+    @patch(f"{_TH}.classify_topic_routing", new_callable=AsyncMock)
     @patch(f"{_TH}.tmux_manager")
     @patch(f"{_TH}.session_manager")
     async def test_shows_directory_browser(
         self,
         mock_sm: MagicMock,
         mock_tm: MagicMock,
+        mock_route: AsyncMock,
         mock_browser: MagicMock,
         mock_reply: AsyncMock,
     ) -> None:
         mock_sm.get_window_for_thread.return_value = None
         mock_sm.iter_thread_bindings.return_value = []
+        mock_route.return_value = ("handle", False)
         mock_tm.list_windows = AsyncMock(return_value=[])
         mock_tm.discover_external_sessions = AsyncMock(return_value=[])
         mock_browser.return_value = ("Browse:", MagicMock(), [])
 
         user_data: dict = {}
-        message = AsyncMock()
+        message = MagicMock()
+        message.chat.id = -100999
+        message.get_bot.return_value.username = "Jacob_localCodexBot"
 
         result = await _handle_unbound_topic(100, 42, "hello", user_data, message)
 
@@ -164,29 +170,88 @@ class TestHandleUnboundTopic:
 
     @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
     @patch(f"{_TH}.build_window_picker")
+    @patch(f"{_TH}.classify_topic_routing", new_callable=AsyncMock)
     @patch(f"{_TH}.tmux_manager")
     @patch(f"{_TH}.session_manager")
     async def test_stores_pending_state(
         self,
         mock_sm: MagicMock,
         mock_tm: MagicMock,
+        mock_route: AsyncMock,
         mock_picker: MagicMock,
         _mock_reply: AsyncMock,
     ) -> None:
         mock_sm.get_window_for_thread.return_value = None
         mock_sm.iter_thread_bindings.return_value = []
+        mock_route.return_value = ("handle", False)
         w = MagicMock(window_id="@5", window_name="proj", cwd="/tmp")
         mock_tm.list_windows = AsyncMock(return_value=[w])
         mock_tm.discover_external_sessions = AsyncMock(return_value=[])
         mock_picker.return_value = ("Pick:", MagicMock(), ["@5"])
 
         user_data: dict = {}
-        message = AsyncMock()
+        message = MagicMock()
+        message.chat.id = -100999
+        message.get_bot.return_value.username = "Jacob_localCodexBot"
 
         await _handle_unbound_topic(100, 42, "my text", user_data, message)
 
         assert user_data[PENDING_THREAD_ID] == 42
         assert user_data[PENDING_THREAD_TEXT] == "my text"
+
+    @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
+    @patch(f"{_TH}.classify_topic_routing", new_callable=AsyncMock)
+    @patch(f"{_TH}.session_manager")
+    async def test_shared_chat_prompt_owner_blocks_unbound_setup_until_explicit_target(
+        self,
+        mock_sm: MagicMock,
+        mock_route: AsyncMock,
+        mock_reply: AsyncMock,
+    ) -> None:
+        mock_sm.get_window_for_thread.return_value = None
+        mock_route.return_value = ("prompt", False)
+
+        user_data: dict = {}
+        message = MagicMock()
+        message.chat.id = -100999
+        message.get_bot.return_value.username = "Jacob_localCodexBot"
+
+        result = await _handle_unbound_topic(100, 42, "hello", user_data, message)
+
+        assert result is True
+        mock_reply.assert_called_once()
+        assert "Multiple bots are available" in mock_reply.call_args.args[1]
+        assert PENDING_THREAD_ID not in user_data
+
+    @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
+    @patch(f"{_TH}.build_directory_browser")
+    @patch(f"{_TH}.classify_topic_routing", new_callable=AsyncMock)
+    @patch(f"{_TH}.tmux_manager")
+    @patch(f"{_TH}.session_manager")
+    async def test_explicit_self_target_on_unbound_topic_stores_pending_default_bot(
+        self,
+        mock_sm: MagicMock,
+        mock_tm: MagicMock,
+        mock_route: AsyncMock,
+        mock_browser: MagicMock,
+        _mock_reply: AsyncMock,
+    ) -> None:
+        mock_sm.get_window_for_thread.return_value = None
+        mock_sm.iter_thread_bindings.return_value = []
+        mock_route.return_value = ("handle", True)
+        mock_tm.list_windows = AsyncMock(return_value=[])
+        mock_tm.discover_external_sessions = AsyncMock(return_value=[])
+        mock_browser.return_value = ("Browse:", MagicMock(), [])
+
+        user_data: dict = {}
+        message = MagicMock()
+        message.chat.id = -100999
+        message.get_bot.return_value.username = "Jacob_localCodexBot"
+
+        result = await _handle_unbound_topic(100, 42, "@Jacob_localCodexBot hello", user_data, message)
+
+        assert result is True
+        assert user_data[PENDING_TOPIC_DEFAULT_BOT] == "Jacob_localCodexBot"
 
 
 class TestHandleDeadWindow:
