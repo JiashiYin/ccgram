@@ -38,7 +38,7 @@ from .message_sender import (
 )
 from .recovery_callbacks import build_recovery_keyboard
 from .status_polling import clear_probe_failures, _maybe_discover_transcript
-from .topic_emoji import update_stored_topic_name
+from .topic_emoji import get_stored_topic_name, update_stored_topic_name
 from .topic_routing import (
     classify_topic_routing,
     format_topic_name_with_default_responder,
@@ -250,10 +250,11 @@ async def _handle_unbound_topic(
 
     bot_username = getattr(message.get_bot(), "username", None)
     explicit_self_target = leading_bot_target(message) is not None
+    stored_display_name = get_stored_topic_name(message.chat.id, thread_id) or ""
     decision, should_claim_default = await classify_topic_routing(
         bot=message.get_bot(),
         chat_id=message.chat.id,
-        display_name="",
+        display_name=stored_display_name,
         bot_username=bot_username,
         explicit_self_target=explicit_self_target,
     )

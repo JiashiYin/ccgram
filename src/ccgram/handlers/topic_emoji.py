@@ -15,11 +15,15 @@ Key functions:
   - clear_topic_emoji_state: Clean up tracking for a topic
 """
 
+import json
 import time
+from pathlib import Path
 
 import structlog
 from telegram import Bot
 from telegram.error import BadRequest, TelegramError
+
+from ..utils import atomic_write_json, ccgram_dir
 
 logger = structlog.get_logger()
 
@@ -63,6 +67,47 @@ _pending_transitions: dict[tuple[int, int], tuple[str, float]] = {}
 # Updated when the incoming display name changes (write-through cache) so that
 # tmux window renames and Telegram topic renames propagate correctly.
 _topic_names: dict[tuple[int, int], str] = {}
+_TOPIC_NAME_CACHE_FILE = "topic-names.json"
+
+
+def _topic_name_cache_path() -> Path:
+    return ccgram_dir() / _TOPIC_NAME_CACHE_FILE
+
+
+def _load_topic_name_cache() -> dict[tuple[int, int], str]:
+    path = _topic_name_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    parsed: dict[tuple[int, int], str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        chat_raw, sep, thread_raw = key.partition(":")
+        if not sep:
+            continue
+        try:
+            parsed[(int(chat_raw), int(thread_raw))] = value
+        except ValueError:
+            continue
+    return parsed
+
+
+def _save_topic_name_cache() -> None:
+    serialized = {
+        f"{chat_id}:{thread_id}": name
+        for (chat_id, thread_id), name in _topic_names.items()
+    }
+    atomic_write_json(_topic_name_cache_path(), serialized)
+
+
+_topic_names.update(_load_topic_name_cache())
 
 # Chats where editForumTopic is disabled due to permission errors
 _disabled_chats: set[int] = set()
@@ -237,6 +282,12 @@ def update_stored_topic_name(chat_id: int, thread_id: int, new_clean_name: str) 
     cycle will naturally use the updated base name.
     """
     _topic_names[(chat_id, thread_id)] = new_clean_name
+    _save_topic_name_cache()
+
+
+def get_stored_topic_name(chat_id: int, thread_id: int) -> str | None:
+    """Return the last persisted clean topic name for a chat/thread pair."""
+    return _topic_names.get((chat_id, thread_id))
 
 
 def clear_topic_emoji_state(chat_id: int, thread_id: int) -> None:
@@ -244,7 +295,8 @@ def clear_topic_emoji_state(chat_id: int, thread_id: int) -> None:
     key = (chat_id, thread_id)
     _topic_states.pop(key, None)
     _pending_transitions.pop(key, None)
-    _topic_names.pop(key, None)
+    if _topic_names.pop(key, None) is not None:
+        _save_topic_name_cache()
 
 
 def reset_all_state() -> None:

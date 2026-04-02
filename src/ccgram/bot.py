@@ -755,6 +755,11 @@ async def topic_created_handler(
     if thread_id is None:
         return
 
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    created = update.message.forum_topic_created
+    if chat_id is not None and created and created.name:
+        update_stored_topic_name(chat_id, thread_id, created.name)
+
     await _handle_unbound_topic(
         user.id,
         thread_id,
@@ -790,12 +795,13 @@ async def topic_edited_handler(
     if chat_id is None:
         return
 
+    clean_name = strip_emoji_prefix(new_name)
+    update_stored_topic_name(chat_id, thread_id, clean_name)
+
     window_id = session_manager.get_window_for_chat_thread(chat_id, thread_id)
     if not window_id:
-        logger.debug("Topic edited: no binding (thread=%d)", thread_id)
+        logger.debug("Topic edited: cached unbound topic name %r (thread=%d)", clean_name, thread_id)
         return
-
-    clean_name = strip_emoji_prefix(new_name)
 
     # Loop guard: if clean name matches current display name, this was a
     # bot-originated emoji/mode change — skip to prevent rename loops.
@@ -809,7 +815,6 @@ async def topic_edited_handler(
     renamed = await tmux_manager.rename_window(window_id, clean_name)
     if renamed:
         session_manager.set_display_name(window_id, clean_name)
-        update_stored_topic_name(chat_id, thread_id, clean_name)
         logger.info(
             "Topic renamed: window %s → %r (thread=%d)",
             window_id,
@@ -1817,6 +1822,7 @@ async def _handle_new_window(event: NewWindowEvent, bot: Bot) -> None:
         try:
             topic_name_for_chat = await _topic_name_for_chat(bot, topic_name=topic_name)
             topic = await bot.create_forum_topic(chat_id=chat_id, name=topic_name_for_chat)
+            update_stored_topic_name(chat_id, topic.message_thread_id, topic_name_for_chat)
             _topic_create_retry_until.pop(chat_id, None)
             logger.info(
                 "Auto-created topic '%s' (thread=%d) in chat %d for window %s",
