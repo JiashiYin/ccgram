@@ -1131,10 +1131,59 @@ class TestPurgeDeadWindowState:
         assert json.loads(session_map.read_text()) == {}
 
     def test_removes_native_registry_entry(self, mgr: SessionManager) -> None:
-        with patch("ccgram.native_sessions.remove_native_session") as mock_remove:
+        with (
+            patch(
+                "ccgram.native_sessions.kill_native_session",
+                return_value=False,
+            ) as mock_kill,
+            patch("ccgram.native_sessions.remove_native_session") as mock_remove,
+        ):
             mgr.purge_dead_window_state("native:dead1")
 
+        mock_kill.assert_called_once_with("native:dead1")
         mock_remove.assert_called_once_with("native:dead1")
+
+    def test_kills_native_session_before_removing_artifacts(
+        self, mgr: SessionManager, monkeypatch
+    ) -> None:
+        mgr.window_states["native:dead"] = WindowState(window_name="dead")
+        mgr.window_display_names["native:dead"] = "dead"
+
+        calls: list[tuple[str, str]] = []
+
+        monkeypatch.setattr(
+            "ccgram.native_sessions.kill_native_session",
+            lambda wid: calls.append(("kill", wid)) or True,
+        )
+        monkeypatch.setattr(
+            "ccgram.native_sessions.remove_native_session",
+            lambda wid: calls.append(("remove", wid)),
+        )
+
+        changed = mgr.purge_dead_window_state("native:dead")
+
+        assert changed is True
+        assert calls == [("kill", "native:dead")]
+
+    def test_removes_native_artifacts_when_registry_entry_is_missing(
+        self, mgr: SessionManager, monkeypatch
+    ) -> None:
+        mgr.window_states["native:dead"] = WindowState(window_name="dead")
+
+        calls: list[tuple[str, str]] = []
+
+        monkeypatch.setattr(
+            "ccgram.native_sessions.kill_native_session",
+            lambda wid: calls.append(("kill", wid)) or False,
+        )
+        monkeypatch.setattr(
+            "ccgram.native_sessions.remove_native_session",
+            lambda wid: calls.append(("remove", wid)),
+        )
+
+        mgr.purge_dead_window_state("native:dead")
+
+        assert calls == [("kill", "native:dead"), ("remove", "native:dead")]
 
 
 class TestPruneStaleStateSkipChatIds:

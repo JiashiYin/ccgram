@@ -831,9 +831,13 @@ class SessionManager:
         if changed:
             self._save_state()
 
-        from .native_sessions import is_native_window, remove_native_session
+        from .native_sessions import (
+            is_native_window,
+            kill_native_session,
+            remove_native_session,
+        )
 
-        if is_native_window(window_id):
+        if is_native_window(window_id) and not kill_native_session(window_id):
             remove_native_session(window_id)
 
         return changed
