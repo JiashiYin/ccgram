@@ -1572,6 +1572,55 @@ class TestMaybeDiscoverTranscript:
         mock_sm.register_hookless_session.assert_not_called()
         mock_sm.write_hookless_session_map.assert_not_called()
 
+    async def test_rewrites_session_map_when_matching_state_entry_missing(self) -> None:
+        from ccgram.handlers.status_polling import _maybe_discover_transcript
+        from ccgram.providers.base import SessionStartEvent
+
+        mock_provider = MagicMock()
+        mock_provider.capabilities.supports_hook = False
+        mock_provider.capabilities.name = "codex"
+        event = SessionStartEvent(
+            session_id="uuid-abc",
+            cwd="/my/project",
+            transcript_path="/path/to/transcript.jsonl",
+            window_key="ccgram:@7",
+        )
+        mock_provider.discover_transcript.return_value = event
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.get_provider_for_window",
+                return_value=mock_provider,
+            ),
+            patch("ccgram.handlers.status_polling.config") as mock_config,
+            patch("ccgram.handlers.status_polling.tmux_manager") as mock_tmux,
+        ):
+            mock_sm.window_states = {
+                "@7": MagicMock(
+                    session_id="uuid-abc",
+                    cwd="/my/project",
+                    transcript_path="/path/to/transcript.jsonl",
+                    provider_name="codex",
+                )
+            }
+            mock_sm.has_session_map_entry.return_value = False
+            mock_config.tmux_session_name = "ccgram"
+            mock_tmux.find_window_by_id = AsyncMock(
+                return_value=MagicMock(pane_current_command="bun")
+            )
+            mock_tmux.get_pane_title = AsyncMock(return_value="")
+            await _maybe_discover_transcript("@7")
+
+        mock_sm.register_hookless_session.assert_not_called()
+        mock_sm.write_hookless_session_map.assert_called_once_with(
+            window_id="@7",
+            session_id="uuid-abc",
+            cwd="/my/project",
+            transcript_path="/path/to/transcript.jsonl",
+            provider_name="codex",
+        )
+
     async def test_session_map_write_runs_in_background_thread(self) -> None:
         """Regression: write_hookless_session_map must run in a thread (flock)."""
         from ccgram.handlers.status_polling import _maybe_discover_transcript

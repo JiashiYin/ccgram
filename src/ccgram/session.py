@@ -292,6 +292,12 @@ class SessionManager:
         """Check if a key looks like a tmux window ID (e.g. '@0', '@12')."""
         return is_window_id(key)
 
+    def _session_map_key(self, window_id: str) -> str:
+        """Return the canonical session_map key for a window."""
+        if is_foreign_window(window_id) or is_native_window(window_id):
+            return window_id
+        return f"{config.tmux_session_name}:{window_id}"
+
     def _load_state(self) -> None:
         """Load state during initialization.
 
@@ -592,9 +598,9 @@ class SessionManager:
         for key in raw:
             if key.startswith(prefix):
                 wid = key[len(prefix) :]
-                if self._is_window_id(wid):
+                if self._is_window_id(wid) or is_native_window(wid):
                     result.add(wid)
-            elif key.startswith(EMDASH_SESSION_PREFIX):
+            elif is_native_window(key) or key.startswith(EMDASH_SESSION_PREFIX):
                 result.add(key)
         return result
 
@@ -920,7 +926,8 @@ class SessionManager:
         changed = False
 
         old_format_keys: list[str] = []
-        for key, info in session_map.items():
+        migrated_native_keys: list[tuple[str, str]] = []
+        for key, info in list(session_map.items()):
             if not isinstance(info, dict):
                 continue
 
@@ -940,19 +947,25 @@ class SessionManager:
                         changed = True
                 continue
 
-            # Native entries: strip prefix, process by window_id
-            if not key.startswith(prefix):
-                continue
-            window_id = key[len(prefix) :]
-            # Old-format key (window_name instead of window_id): remember the
-            # session_id so migrated window_states survive stale cleanup,
-            # then mark for removal from session_map.json.
-            if not self._is_window_id(window_id):
-                sid = info.get("session_id", "")
-                if sid:
-                    old_format_sids.add(sid)
-                old_format_keys.append(key)
-                continue
+            # Native entries: plain native:<id> keys are already canonical and
+            # must not flow through tmux-style old-format key pruning.
+            if is_native_window(key):
+                window_id = key
+            else:
+                if not key.startswith(prefix):
+                    continue
+                window_id = key[len(prefix) :]
+                if is_native_window(window_id):
+                    migrated_native_keys.append((key, window_id))
+                # Old-format key (window_name instead of window_id): remember the
+                # session_id so migrated window_states survive stale cleanup,
+                # then mark for removal from session_map.json.
+                if not self._is_window_id(window_id) and not is_native_window(window_id):
+                    sid = info.get("session_id", "")
+                    if sid:
+                        old_format_sids.add(sid)
+                    old_format_keys.append(key)
+                    continue
             valid_wids.add(window_id)
             if self._sync_window_from_session_map(window_id, info):
                 changed = True
@@ -980,6 +993,14 @@ class SessionManager:
             logger.info("Removing stale window_state: %s", wid)
             del self.window_states[wid]
             changed = True
+
+        # Rewrite legacy prefixed native keys to canonical native:* keys.
+        if migrated_native_keys:
+            for old_key, new_key in migrated_native_keys:
+                if new_key not in session_map:
+                    session_map[new_key] = session_map[old_key]
+                del session_map[old_key]
+            atomic_write_json(config.session_map_file, session_map)
 
         # Purge old-format keys from session_map.json so they don't
         # get logged every poll cycle.
@@ -1034,11 +1055,7 @@ class SessionManager:
 
         map_file = config.session_map_file
         map_file.parent.mkdir(parents=True, exist_ok=True)
-        # Foreign windows (emdash) are already fully qualified
-        if is_foreign_window(window_id):
-            window_key = window_id
-        else:
-            window_key = f"{config.tmux_session_name}:{window_id}"
+        window_key = self._session_map_key(window_id)
         lock_path = map_file.with_suffix(".lock")
         try:
             with open(lock_path, "w") as lock_f:
@@ -1072,6 +1089,33 @@ class SessionManager:
         """Look up session_id for a window from window_states."""
         state = self.window_states.get(window_id)
         return state.session_id if state and state.session_id else None
+
+    def has_session_map_entry(
+        self,
+        window_id: str,
+        *,
+        session_id: str | None = None,
+        transcript_path: str | None = None,
+        provider_name: str | None = None,
+    ) -> bool:
+        """Return whether session_map.json contains the expected window entry."""
+        if not config.session_map_file.exists():
+            return False
+        try:
+            raw = json.loads(config.session_map_file.read_text())
+        except (json.JSONDecodeError, OSError):  # fmt: skip
+            return False
+        entry = raw.get(self._session_map_key(window_id))
+        if not isinstance(entry, dict):
+            return False
+        if session_id is not None and entry.get("session_id") != session_id:
+            return False
+        if (
+            transcript_path is not None
+            and entry.get("transcript_path") != transcript_path
+        ):
+            return False
+        return provider_name is None or entry.get("provider_name") == provider_name
 
     # --- Window state management ---
 
@@ -1139,7 +1183,7 @@ class SessionManager:
                 fcntl.flock(lock_f, fcntl.LOCK_EX)
                 try:
                     raw = json.loads(config.session_map_file.read_text())
-                    key = f"{config.tmux_session_name}:{window_id}"
+                    key = self._session_map_key(window_id)
                     if key in raw:
                         del raw[key]
                         atomic_write_json(config.session_map_file, raw)

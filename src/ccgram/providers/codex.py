@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from ccgram.config import config
 from ccgram.interactive_prompt_formatter import format_codex_interactive_prompt
 from ccgram.providers._jsonl import JsonlProvider
 from ccgram.providers.base import (
@@ -80,6 +81,32 @@ def _is_subagent_session_meta(meta: dict[str, Any]) -> bool:
     if not isinstance(subagent, dict):
         return False
     return isinstance(subagent.get("thread_spawn"), dict)
+
+
+def _claimed_session_ids(window_key: str) -> set[str]:
+    """Return session IDs already claimed by other windows in session_map.json."""
+    session_map_file = config.session_map_file
+    if not session_map_file.exists():
+        return set()
+    try:
+        raw = json.loads(session_map_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    current_keys = {window_key}
+    if window_key.startswith("ccgram:"):
+        current_keys.add(window_key.replace("ccgram:", "ccbot:", 1))
+    elif window_key.startswith("ccbot:"):
+        current_keys.add(window_key.replace("ccbot:", "ccgram:", 1))
+
+    claimed: set[str] = set()
+    for key, info in raw.items():
+        if key in current_keys or not isinstance(info, dict):
+            continue
+        session_id = info.get("session_id", "")
+        if isinstance(session_id, str) and session_id:
+            claimed.add(session_id)
+    return claimed
 
 
 def _format_codex_tool_result(raw_tool_name: str, output_text: str) -> str:
@@ -787,6 +814,7 @@ class CodexProvider(JsonlProvider):
         jsonl_files = _collect_codex_sessions(sessions_dir)
         now = time.time()
         resolved_cwd = str(Path(cwd).resolve())
+        claimed_elsewhere = _claimed_session_ids(window_key)
         for mtime, fpath in jsonl_files[:20]:
             if age_limit > 0 and now - mtime > age_limit:
                 break  # sorted newest-first; remaining are all older
@@ -798,6 +826,8 @@ class CodexProvider(JsonlProvider):
             file_cwd = meta.get("cwd", "")
             if file_cwd and str(Path(file_cwd).resolve()) == resolved_cwd:
                 session_id = meta.get("id", "")
+                if session_id in claimed_elsewhere:
+                    continue
                 if session_id:
                     return SessionStartEvent(
                         session_id=session_id,

@@ -222,7 +222,7 @@ def _capture_existing_shell_function(provider: str, shell: str) -> str:
             text=True,
             timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return ""
     if proc.returncode != 0:
         return ""

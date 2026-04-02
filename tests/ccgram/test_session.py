@@ -267,6 +267,92 @@ class TestLoadSessionMapDisplayName:
         assert mgr.get_display_name("@2") == "project-2"
         assert mgr.window_states["@2"].window_name == "project-2"
 
+    async def test_loads_native_session_map_entries(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "native:abc123": {
+                        "session_id": "sid-native",
+                        "cwd": "/tmp/native-project",
+                        "window_name": "native-project",
+                        "transcript_path": "/tmp/native.jsonl",
+                        "provider_name": "codex",
+                    }
+                }
+            )
+        )
+
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        await mgr.load_session_map()
+
+        assert mgr.window_states["native:abc123"].session_id == "sid-native"
+        assert mgr.window_states["native:abc123"].provider_name == "codex"
+        assert mgr.window_states["native:abc123"].transcript_path == "/tmp/native.jsonl"
+        assert mgr.get_display_name("native:abc123") == "native-project"
+        result = json.loads(session_map_file.read_text())
+        assert "native:abc123" in result
+
+    async def test_keeps_native_entries_in_session_map_file(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "native:keepme": {
+                        "session_id": "sid-native",
+                        "cwd": "/tmp/native-project",
+                        "window_name": "native-project",
+                    },
+                    "ccgram:stale-window-name": {
+                        "session_id": "sid-stale",
+                        "cwd": "/tmp/stale-project",
+                        "window_name": "stale-project",
+                    },
+                }
+            )
+        )
+
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        await mgr.load_session_map()
+
+        result = json.loads(session_map_file.read_text())
+        assert "native:keepme" in result
+        assert "ccgram:stale-window-name" not in result
+
+    async def test_migrates_legacy_prefixed_native_entries(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "ccgram:native:legacy123": {
+                        "session_id": "sid-native",
+                        "cwd": "/tmp/native-project",
+                        "window_name": "native-project",
+                    }
+                }
+            )
+        )
+
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        await mgr.load_session_map()
+
+        result = json.loads(session_map_file.read_text())
+        assert "native:legacy123" in result
+        assert "ccgram:native:legacy123" not in result
+        assert mgr.window_states["native:legacy123"].session_id == "sid-native"
+
 
 class TestParseSessionMap:
     def test_filters_by_prefix(self) -> None:
@@ -451,6 +537,67 @@ class TestPruneSessionMap:
         assert "native:live456" in result
         assert "native:dead123" not in mgr.window_states
         assert "native:live456" in mgr.window_states
+
+
+class TestSessionMapHelpers:
+    def test_get_session_map_window_ids_includes_native(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "native:abc123": {"session_id": "sid-native", "cwd": "/tmp"},
+                    "ccgram:@7": {"session_id": "sid-tmux", "cwd": "/tmp"},
+                }
+            )
+        )
+
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        assert mgr._get_session_map_window_ids() == {"native:abc123", "@7"}
+
+    def test_write_hookless_session_map_uses_native_key(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        mgr.write_hookless_session_map(
+            window_id="native:abc123",
+            session_id="sid-native",
+            cwd="/tmp/native-project",
+            transcript_path="/tmp/native.jsonl",
+            provider_name="codex",
+        )
+
+        result = json.loads(session_map_file.read_text())
+        assert "native:abc123" in result
+        assert "ccgram:native:abc123" not in result
+
+    def test_clear_session_map_entry_handles_native_key(
+        self, mgr: SessionManager, tmp_path, monkeypatch
+    ) -> None:
+        session_map_file = tmp_path / "session_map.json"
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "native:abc123": {"session_id": "sid-native", "cwd": "/tmp"},
+                    "ccgram:@7": {"session_id": "sid-tmux", "cwd": "/tmp"},
+                }
+            )
+        )
+
+        monkeypatch.setattr("ccgram.session.config.session_map_file", session_map_file)
+        monkeypatch.setattr("ccgram.session.config.tmux_session_name", "ccgram")
+
+        mgr._clear_session_map_entry("native:abc123")
+
+        result = json.loads(session_map_file.read_text())
+        assert "native:abc123" not in result
+        assert "ccgram:@7" in result
 
 
 class TestWindowStateProviderName:

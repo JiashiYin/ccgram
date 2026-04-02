@@ -1583,6 +1583,66 @@ class TestCodexDiscoverTranscript:
         assert event is not None
         assert event.session_id == "uuid-fresh"
 
+    def test_skips_session_claimed_by_other_window(self, tmp_path: Path) -> None:
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        _write_codex_session(
+            sessions_dir, "2026/03/01", "fallback", "uuid-fallback", "/my/project"
+        )
+        time.sleep(0.05)
+        claimed = _write_codex_session(
+            sessions_dir, "2026/03/02", "claimed", "uuid-claimed", "/my/project"
+        )
+        session_map_file = tmp_path / ".ccgram" / "session_map.json"
+        session_map_file.parent.mkdir(parents=True, exist_ok=True)
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "ccgram:@other": {
+                        "session_id": "uuid-claimed",
+                        "cwd": "/my/project",
+                    }
+                }
+            )
+        )
+
+        codex = CodexProvider()
+        with (
+            patch.object(Path, "home", return_value=tmp_path),
+            patch("ccgram.providers.codex.config.session_map_file", session_map_file),
+        ):
+            event = codex.discover_transcript("/my/project", "ccgram:@7", max_age=0)
+        assert event is not None
+        assert event.session_id == "uuid-fallback"
+        assert event.transcript_path != str(claimed)
+
+    def test_allows_current_window_to_keep_its_own_claim(self, tmp_path: Path) -> None:
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        fpath = _write_codex_session(
+            sessions_dir, "2026/03/02", "current", "uuid-current", "/my/project"
+        )
+        session_map_file = tmp_path / ".ccgram" / "session_map.json"
+        session_map_file.parent.mkdir(parents=True, exist_ok=True)
+        session_map_file.write_text(
+            json.dumps(
+                {
+                    "ccgram:@7": {
+                        "session_id": "uuid-current",
+                        "cwd": "/my/project",
+                    }
+                }
+            )
+        )
+
+        codex = CodexProvider()
+        with (
+            patch.object(Path, "home", return_value=tmp_path),
+            patch("ccgram.providers.codex.config.session_map_file", session_map_file),
+        ):
+            event = codex.discover_transcript("/my/project", "ccgram:@7", max_age=0)
+        assert event is not None
+        assert event.session_id == "uuid-current"
+        assert event.transcript_path == str(fpath)
+
 
 class TestCodexDiscoverTranscriptMaxAge:
     def test_max_age_zero_ignores_staleness(self, tmp_path: Path) -> None:

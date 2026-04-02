@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+import subprocess
 
 import pytest
 from click.testing import CliRunner
@@ -524,6 +525,31 @@ class TestNotifyInstall:
         assert result.exit_code == 0
         launcher_text = _direct_launcher_path(tmp_path, "codex").read_text()
         assert "/usr/bin/codex --full-auto" in launcher_text
+
+    def test_install_falls_back_when_bash_function_probe_times_out(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        def _run(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(["bash", "-ic", "declare -f codex"], 5)
+
+        monkeypatch.setattr("ccgram.notify_shell.subprocess.run", _run)
+        monkeypatch.setattr(
+            "ccgram.notify_shell.shutil.which",
+            lambda name: f"/usr/bin/{name}",
+        )
+
+        result = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+
+        assert result.exit_code == 0
+        launcher_text = _direct_launcher_path(tmp_path, "codex").read_text()
+        assert "exec /usr/bin/codex \"$@\"" in launcher_text
 
     def test_resolve_notify_launch_command_prefers_installed_direct_launcher(
         self, tmp_path: Path, monkeypatch

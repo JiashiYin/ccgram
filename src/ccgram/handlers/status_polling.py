@@ -1423,6 +1423,20 @@ async def _maybe_discover_transcript(  # noqa: PLR0915
                 and state.transcript_path == event.transcript_path
                 and state.provider_name == provider_name
             ):
+                if not session_manager.has_session_map_entry(
+                    window_id,
+                    session_id=event.session_id,
+                    transcript_path=event.transcript_path,
+                    provider_name=provider_name,
+                ):
+                    await asyncio.to_thread(
+                        session_manager.write_hookless_session_map,
+                        window_id=window_id,
+                        session_id=event.session_id,
+                        cwd=event.cwd,
+                        transcript_path=event.transcript_path,
+                        provider_name=provider_name,
+                    )
                 return
             session_manager.register_hookless_session(
                 window_id=window_id,
