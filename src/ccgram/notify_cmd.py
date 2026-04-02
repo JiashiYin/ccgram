@@ -66,7 +66,6 @@ def _print_notify_status(provider: str) -> None:
         print(f"Mode: {status.mode}")
         print(f"RC file: {status.rc_path}")
         print(f"Snippet: {status.snippet_path}")
-        print(f"Direct launcher: {status.direct_launcher_path}")
     for line in format_notify_service_status(get_notify_service_status()):
         print(line)
 
@@ -195,7 +194,7 @@ def notify_disable_cmd(provider: str) -> None:
 @notify_group.command("uninstall")
 @click.option("--provider", default="codex", show_default=True)
 def notify_uninstall_cmd(provider: str) -> None:
-    """Remove notify shell integration and direct-launch override."""
+    """Remove notify shell integration and its internal launcher."""
     uninstall_notify_shell(provider)
     if not any_notify_providers_enabled():
         uninstall_notify_service()

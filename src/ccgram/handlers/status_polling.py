@@ -535,7 +535,7 @@ async def _flush_pending_notify_report(
 
 
 async def _cleanup_dead_notify_window(bot: Bot, window_id: str) -> None:
-    """Delete/close notify topics for a dead window and purge local state."""
+    """Delete/close bound topics for a confirmed-dead window and purge local state."""
     bindings = [
         (user_id, thread_id)
         for user_id, thread_id, wid in session_manager.iter_thread_bindings()
@@ -559,8 +559,6 @@ async def _handle_missing_window(
 
     if session_manager.get_notification_mode(wid) != "notify":
         await _handle_dead_window_notification(bot, user_id, thread_id, wid)
-        return
-
     if ws.missing_polls < _DEAD_WINDOW_CONFIRMATION_POLLS:
         return
 
@@ -1145,8 +1143,46 @@ async def _prune_stale_state(live_windows: list) -> None:
     """
     live_ids = {w.window_id for w in live_windows}
     live_pairs = [(w.window_id, w.window_name) for w in live_windows]
+    session_manager.prune_session_map(live_ids)
     session_manager.sync_display_names(live_pairs)
     session_manager.prune_stale_state(live_ids)
+    session_manager.prune_stale_window_states(live_ids)
+    known_ids = set(live_ids)
+    known_ids.update(session_manager.window_states.keys())
+    for _user_id, _thread_id, wid in session_manager.iter_thread_bindings():
+        known_ids.add(wid)
+    session_manager.prune_stale_offsets(known_ids)
+
+
+async def _cleanup_ghost_bindings(bot: Bot, live_windows: list) -> None:
+    """Remove bindings/topics for confirmed-dead windows left in persisted state."""
+    live_ids = {w.window_id for w in live_windows}
+    live_pairs = [(w.window_id, w.window_name) for w in live_windows]
+    audit = session_manager.audit_state(live_ids, live_pairs)
+    cleaned: set[str] = set()
+    for issue in audit.issues:
+        if issue.category != "ghost_binding":
+            continue
+        detail = issue.detail
+        try:
+            user_part, thread_part, window_part, _rest = detail.split(" ", 3)
+            user_id = int(user_part.split(":", 1)[1])
+            thread_id = int(thread_part.split(":", 1)[1])
+            wid = window_part.split(":", 1)[1]
+        except (IndexError, ValueError):
+            logger.warning("Failed to parse ghost binding detail: %s", detail)
+            continue
+        if wid in cleaned:
+            continue
+        await _cleanup_dead_notify_window(bot, wid)
+        clear_dead_notification(user_id, thread_id)
+        cleaned.add(wid)
+        logger.info(
+            "Purged ghost binding for dead window %s (user=%d thread=%d)",
+            wid,
+            user_id,
+            thread_id,
+        )
 
 
 async def _cleanup_duplicate_notify_bindings(bot: Bot) -> None:
@@ -1236,7 +1272,7 @@ async def _maybe_check_passive_shell(
     await check_passive_shell_output(bot, user_id, thread_id, window_id, rendered)
 
 
-async def _maybe_discover_transcript(
+async def _maybe_discover_transcript(  # noqa: PLR0915
     window_id: str,
     *,
     _window: TmuxWindow | None = None,
@@ -1429,6 +1465,7 @@ async def status_poll_loop(bot: Bot) -> None:
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
                 await _prune_stale_state(all_windows)
+                await _cleanup_ghost_bindings(bot, all_windows)
                 await _cleanup_duplicate_notify_bindings(bot)
                 await _probe_topic_existence(bot)
                 # Sweep stale log-throttle entries to prevent unbounded growth
@@ -1438,10 +1475,6 @@ async def status_poll_loop(bot: Bot) -> None:
                 structlog.contextvars.clear_contextvars()
                 structlog.contextvars.bind_contextvars(window_id=wid)
                 try:
-                    # Already notified about this dead window — skip tmux check
-                    if (user_id, thread_id, wid) in _dead_notified:
-                        continue
-
                     w = window_lookup.get(wid)
                     if not w:
                         await _handle_missing_window(bot, user_id, thread_id, wid)

@@ -262,7 +262,7 @@ Temporarily stop intercepting plain `codex` without removing the rest of the set
 ccgram notify disable
 ```
 
-Remove the shell hook and direct-launch override completely:
+Remove the shell hook and the internal notify launcher completely:
 
 ```bash
 ccgram notify uninstall
@@ -274,7 +274,7 @@ Quiet `notify` topics stay silent while the agent is still working. Telegram onl
 
 - blocking prompts surface automatically and remain interactive
 - Codex report-backs surface automatically once the session becomes idle and is waiting for you
-- dead or failed sessions break through and are cleaned up instead of piling up as stale topics
+- dead or failed sessions break through and are then purged from the bound topic/state instead of piling up as stale bindings
 
 Routine progress stays quiet in `notify`; there is no special marker syntax to add to prompts or skills. Codex is the first-class notify provider in this release. Non-interactive halt delivery uses Codex transcript turn semantics, including explicit final-answer turns and Codex task-completion events, instead of forwarding generic commentary.
 

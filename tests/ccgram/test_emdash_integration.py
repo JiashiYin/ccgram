@@ -287,6 +287,15 @@ class TestKillWindowForeignGuard:
             result = await tm.kill_window("@5")
         assert result is False  # no session, but didn't skip
 
+    async def test_kills_native_window_via_native_session_cleanup(self) -> None:
+        from ccgram.tmux_manager import TmuxManager
+
+        tm = TmuxManager(session_name="test")
+        with patch("ccgram.tmux_manager.kill_native_session", return_value=True) as mock_kill:
+            result = await tm.kill_window("native:abc123")
+        assert result is True
+        mock_kill.assert_called_once_with("native:abc123")
+
 
 # ── Window picker with emdash windows ─────────────────────────────────
 

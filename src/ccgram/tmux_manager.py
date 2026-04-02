@@ -31,6 +31,7 @@ from .native_sessions import (
     capture_native_pane_raw,
     get_native_window,
     is_native_window,
+    kill_native_session,
     list_native_windows,
     send_native_keys,
 )
@@ -791,6 +792,8 @@ class TmuxManager:
 
         Foreign windows (emdash) are never killed — they are owned externally.
         """
+        if is_native_window(window_id):
+            return await asyncio.to_thread(kill_native_session, window_id)
         if is_foreign_window(window_id):
             logger.info("Skipping kill for external window %s", window_id)
             return False

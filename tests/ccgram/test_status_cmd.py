@@ -27,6 +27,7 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "test-session")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
         monkeypatch.setattr(
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=False, running=False),
@@ -47,6 +48,7 @@ class TestStatusMain:
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=False, running=False),
         )
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
 
         state = {
             "thread_bindings": {"12345": {"42": "@5"}},
@@ -82,6 +84,7 @@ class TestStatusMain:
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=False, running=False),
         )
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
 
         state = {
             "thread_bindings": {"12345": {"42": "@5"}},
@@ -98,6 +101,41 @@ class TestStatusMain:
         assert "dead" in captured.out
         assert "gone-project" in captured.out
 
+    def test_live_native_window_is_not_reported_dead(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("TMUX_SESSION_NAME", "ccgram")
+        monkeypatch.setattr(
+            "ccgram.status_cmd.get_notify_service_status",
+            lambda: SimpleNamespace(installed=False, running=False),
+        )
+
+        state = {
+            "thread_bindings": {"12345": {"42": "native:abc"}},
+            "window_display_names": {"native:abc": "native-proj"},
+        }
+        (tmp_path / "state.json").write_text(json.dumps(state))
+
+        session_map = {
+            "native:abc": {"session_id": "abc-123", "cwd": "/tmp"},
+        }
+        (tmp_path / "session_map.json").write_text(json.dumps(session_map))
+
+        monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr(
+            "ccgram.status_cmd.list_native_windows",
+            lambda: [SimpleNamespace(window_id="native:abc", window_name="native-proj")],
+        )
+
+        with contextlib.suppress(SystemExit):
+            status_main()
+
+        captured = capsys.readouterr()
+        assert "native:abc" in captured.out
+        assert "alive" in captured.out
+        assert "dead" not in captured.out
+
     def test_unbound_window(self, tmp_path, monkeypatch, capsys) -> None:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "ccgram")
@@ -105,6 +143,7 @@ class TestStatusMain:
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=False, running=False),
         )
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
 
         monkeypatch.setattr(
             "ccgram.status_cmd._list_tmux_windows",
@@ -123,6 +162,7 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_PROVIDER", "claude")
         monkeypatch.setenv("TMUX_SESSION_NAME", "test")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
         monkeypatch.setattr(
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=False, running=False),
@@ -143,6 +183,7 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_PROVIDER", "codex")
         monkeypatch.setenv("TMUX_SESSION_NAME", "test")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
         monkeypatch.setattr(
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=False, running=False),
@@ -159,6 +200,7 @@ class TestStatusMain:
         monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
         monkeypatch.setenv("TMUX_SESSION_NAME", "test")
         monkeypatch.setattr("ccgram.status_cmd._list_tmux_windows", lambda _: [])
+        monkeypatch.setattr("ccgram.status_cmd.list_native_windows", lambda: [])
         monkeypatch.setattr(
             "ccgram.status_cmd.get_notify_service_status",
             lambda: SimpleNamespace(installed=True, running=True),

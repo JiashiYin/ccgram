@@ -255,30 +255,23 @@ def _write_direct_launcher(path: Path, command: str) -> None:
     path.chmod(0o755)
 
 
-def _shell_wrapper(provider: str, shell: str, direct_path: Path) -> str:
-    quoted_direct = shlex.quote(str(direct_path))
+def _shell_wrapper(provider: str, shell: str) -> str:
     if shell == "fish":
         return (
             f"function {provider}\n"
             f"    command ccgram notify launch --provider {provider} --mode notify -- $argv\n"
             "end\n\n"
-            f"function {provider}-direct\n"
-            f"    command {quoted_direct} $argv\n"
-            "end\n"
         )
     return (
         f"{provider}() {{\n"
         f'  command ccgram notify launch --provider {provider} --mode notify -- "$@"\n'
         "}\n\n"
-        f"alias {provider}-direct={quoted_direct}\n"
     )
 
 
-def _write_shell_wrapper(
-    path: Path, provider: str, shell: str, direct_path: Path
-) -> None:
+def _write_shell_wrapper(path: Path, provider: str, shell: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_shell_wrapper(provider, shell, direct_path))
+    path.write_text(_shell_wrapper(provider, shell))
 
 
 def _resolve_direct_command(
@@ -350,7 +343,7 @@ def install_notify_shell(
                 old_snippet_path.unlink(missing_ok=True)
 
     _write_direct_launcher(direct_path, direct_command)
-    _write_shell_wrapper(snippet_path, provider, shell_name, direct_path)
+    _write_shell_wrapper(snippet_path, provider, shell_name)
     _write_rc_block(rc_path, snippet_path)
     _set_env_value(_dotenv_path(), _env_key(provider), str(direct_path))
 

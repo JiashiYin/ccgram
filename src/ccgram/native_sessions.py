@@ -264,18 +264,37 @@ def _kill_native_process_group(record: dict[str, Any]) -> None:
 
 
 def remove_native_session(window_id: str) -> None:
-    """Remove a native session from the registry and delete its socket file."""
+    """Remove a native session from the registry and delete its local artifacts."""
     data = _load_registry()
     sessions = data.get("sessions", {})
     if not isinstance(sessions, dict):
         return
     record = sessions.pop(window_id, None)
     if isinstance(record, dict):
-        control_socket = record.get("control_socket_path")
-        if isinstance(control_socket, str) and control_socket:
+        cleanup_dirs: set[Path] = set()
+        for key in ("control_socket_path", "snapshot_path"):
+            raw_path = record.get(key)
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            path = Path(raw_path)
             with contextlib.suppress(OSError):
-                Path(control_socket).unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
+            cleanup_dirs.add(path.parent)
+        for directory in cleanup_dirs:
+            with contextlib.suppress(OSError):
+                directory.rmdir()
     _save_registry(data)
+
+
+def kill_native_session(window_id: str) -> bool:
+    """Terminate a native session process group and remove all persisted state."""
+    record = _read_record(window_id)
+    if not record:
+        return False
+    _kill_native_process_group(record)
+    mark_native_session_exited(window_id, exit_code=-1, ended_at=time.time())
+    remove_native_session(window_id)
+    return True
 
 
 def list_native_windows(

@@ -14,6 +14,7 @@ from tests.ccgram.conftest import make_mock_provider
 from ccgram.handlers.status_polling import (
     PendingNotifyReport,
     _check_autoclose_timers,
+    _cleanup_ghost_bindings,
     _check_transcript_activity,
     _clear_autoclose_if_active,
     _dead_notified,
@@ -36,6 +37,7 @@ from ccgram.handlers.status_polling import (
     is_shell_prompt,
     reset_screen_buffer_state,
 )
+from ccgram.session import AuditIssue, AuditResult
 from ccgram.tmux_manager import PaneInfo
 
 
@@ -910,6 +912,84 @@ class TestMissingNotifyWindowCleanup:
         mock_sm.unbind_thread.assert_called_once_with(1, 42)
         mock_purge.assert_called_once_with("@0")
 
+    async def test_interactive_window_is_purged_after_confirmation(self) -> None:
+        bot = AsyncMock(spec=Bot)
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.remove_topic",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_remove_topic,
+            patch(
+                "ccgram.handlers.status_polling.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as mock_clear_topic,
+            patch(
+                "ccgram.handlers.status_polling._handle_dead_window_notification",
+                new_callable=AsyncMock,
+            ) as mock_dead_notice,
+            patch(
+                "ccgram.handlers.status_polling.purge_dead_window_state"
+            ) as mock_purge,
+        ):
+            mock_sm.get_notification_mode.return_value = "interactive"
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@0")]
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _handle_missing_window(bot, 1, 42, "@0")
+            mock_remove_topic.assert_not_awaited()
+
+            await _handle_missing_window(bot, 1, 42, "@0")
+
+        assert mock_dead_notice.await_count == 2
+        mock_remove_topic.assert_awaited_once_with(bot, -100, 42)
+        mock_clear_topic.assert_awaited_once_with(1, 42, bot=bot, window_id="@0")
+        mock_sm.unbind_thread.assert_called_once_with(1, 42)
+        mock_purge.assert_called_once_with("@0")
+
+
+class TestGhostBindingCleanup:
+    async def test_cleanup_ghost_bindings_removes_dead_topics(self) -> None:
+        bot = AsyncMock(spec=Bot)
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.remove_topic",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_remove_topic,
+            patch(
+                "ccgram.handlers.status_polling.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as mock_clear_topic,
+            patch(
+                "ccgram.handlers.status_polling.purge_dead_window_state"
+            ) as mock_purge,
+        ):
+            mock_sm.audit_state.return_value = AuditResult(
+                issues=[
+                    AuditIssue(
+                        "ghost_binding",
+                        "user:1 thread:42 window:@0 (dead)",
+                        fixable=True,
+                    )
+                ],
+                total_bindings=1,
+                live_binding_count=0,
+            )
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@0")]
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _cleanup_ghost_bindings(bot, [])
+
+        mock_remove_topic.assert_awaited_once_with(bot, -100, 42)
+        mock_clear_topic.assert_awaited_once_with(1, 42, bot=bot, window_id="@0")
+        mock_sm.unbind_thread.assert_called_once_with(1, 42)
+        mock_purge.assert_called_once_with("@0")
+
 
 class TestDuplicateNotifyBindingCleanup:
     async def test_duplicate_notify_topic_is_removed(self) -> None:
@@ -1028,19 +1108,29 @@ class TestPruneStaleStatePolling:
         mock_win.window_id = "@1"
         mock_win.window_name = "proj"
         with patch("ccgram.handlers.status_polling.session_manager") as mock_sm:
+            mock_sm.window_states = {"@1": MagicMock()}
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@1")]
             mock_sm.sync_display_names.return_value = False
             mock_sm.prune_stale_state.return_value = False
             await _prune_stale_state([mock_win])
+        mock_sm.prune_session_map.assert_called_once_with({"@1"})
         mock_sm.sync_display_names.assert_called_once_with([("@1", "proj")])
         mock_sm.prune_stale_state.assert_called_once_with({"@1"})
+        mock_sm.prune_stale_window_states.assert_called_once_with({"@1"})
+        mock_sm.prune_stale_offsets.assert_called_once_with({"@1"})
 
     async def test_empty_window_list(self) -> None:
         with patch("ccgram.handlers.status_polling.session_manager") as mock_sm:
+            mock_sm.window_states = {}
+            mock_sm.iter_thread_bindings.return_value = []
             mock_sm.sync_display_names.return_value = False
             mock_sm.prune_stale_state.return_value = False
             await _prune_stale_state([])
+        mock_sm.prune_session_map.assert_called_once_with(set())
         mock_sm.sync_display_names.assert_called_once_with([])
         mock_sm.prune_stale_state.assert_called_once_with(set())
+        mock_sm.prune_stale_window_states.assert_called_once_with(set())
+        mock_sm.prune_stale_offsets.assert_called_once_with(set())
 
 
 class TestProviderSwitchPromptSetup:

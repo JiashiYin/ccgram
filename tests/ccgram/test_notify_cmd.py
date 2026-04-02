@@ -316,7 +316,7 @@ class TestNotifyInstall:
             'ccgram notify launch --provider codex --mode interactive --attach -- "$@"'
             not in snippet
         )
-        assert "codex-direct" in snippet
+        assert "codex-direct" not in snippet
 
         rc_text = (tmp_path / ".bashrc").read_text()
         assert ">>> ccgram notify >>>" in rc_text
@@ -392,6 +392,7 @@ class TestNotifyInstall:
         assert "Status: enabled" in result.output
         assert "Shell: bash" in result.output
         assert "Mode: notify" in result.output
+        assert "Direct launcher:" not in result.output
 
     def test_reinstall_with_new_shell_cleans_previous_rc_hook(
         self, tmp_path: Path, monkeypatch

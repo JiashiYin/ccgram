@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .native_sessions import list_native_windows
 from .notify_service import get_notify_service_status
 from .notify_shell import iter_notify_statuses
 from .utils import ccgram_dir, tmux_session_name
@@ -87,6 +88,11 @@ def status_main() -> None:
 
     # Get live tmux windows
     live_windows = _list_tmux_windows(session_name)
+    native_windows = [
+        {"id": window.window_id, "name": window.window_name}
+        for window in list_native_windows()
+    ]
+    live_windows.extend(native_windows)
 
     # Build binding index: window_id -> (thread_id, user_id)
     thread_bindings = state.get("thread_bindings", {})
@@ -98,7 +104,11 @@ def status_main() -> None:
 
     # Count monitored sessions
     prefix = f"{session_name}:"
-    monitored = sum(1 for k in session_map if k.startswith(prefix))
+    monitored = sum(
+        1
+        for k in session_map
+        if k.startswith(prefix) or k.startswith("native:") or k.startswith("emdash-")
+    )
 
     # Output
     print(f"ccgram {__version__}")
