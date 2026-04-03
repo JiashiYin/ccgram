@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import signal
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from ccgram.native_sessions import (
     NATIVE_WINDOW_PREFIX,
     capture_native_pane,
+    kill_native_session,
     list_native_windows,
     find_orphaned_native_sessions,
     mark_native_session_exited,
@@ -124,6 +125,42 @@ def test_send_native_keys_writes_json_command_to_socket(
             {"chars": "Enter", "enter": False, "literal": False}
         ).encode("utf-8")
     )
+
+
+def test_kill_native_session_escalates_from_term_to_kill(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}kill1"
+    snapshot_path = tmp_path / "native" / "kill1" / "snapshot.json"
+    control_path = tmp_path / "native" / "kill1" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="/dev/pts/9",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=120,
+        rows=40,
+        pid=1234,
+        process_group_id=777,
+        launcher_tty="/dev/pts/5",
+    )
+
+    with (
+        patch("ccgram.native_sessions.os.killpg") as mock_killpg,
+        patch("ccgram.native_sessions._wait_for_pid_exit", side_effect=[False, True]),
+    ):
+        assert kill_native_session(window_id) is True
+
+    assert mock_killpg.call_args_list == [
+        call(777, signal.SIGTERM),
+        call(777, signal.SIGKILL),
+    ]
 
 
 def test_list_native_windows_hides_old_exited_sessions(

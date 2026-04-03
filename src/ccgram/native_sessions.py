@@ -329,6 +329,18 @@ def mark_native_session_exited(
     )
 
 
+def _signal_native_process_group(record: dict[str, Any], signum: signal.Signals) -> None:
+    """Best-effort signal delivery to a native-session process group."""
+    pgid = record.get("process_group_id")
+    if not isinstance(pgid, int) or pgid <= 0:
+        pid = record.get("pid")
+        pgid = pid if isinstance(pid, int) and pid > 0 else None
+    if pgid is None:
+        return
+    with contextlib.suppress(ProcessLookupError, OSError):
+        os.killpg(pgid, signum)
+
+
 def _kill_native_process_group(record: dict[str, Any]) -> None:
     """Best-effort reap of a stale detached native-session process group."""
     pgid = record.get("process_group_id")
@@ -346,6 +358,18 @@ def _kill_native_process_group(record: dict[str, Any]) -> None:
         if isinstance(pid, int) and pid > 0:
             with contextlib.suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
+
+
+def _wait_for_pid_exit(pid: int, *, timeout: float) -> bool:
+    """Poll for a PID to disappear within the given timeout."""
+    if pid <= 0:
+        return True
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.1)
+    return not _pid_is_running(pid)
 
 
 def remove_native_session(window_id: str) -> None:
@@ -376,7 +400,11 @@ def kill_native_session(window_id: str) -> bool:
     record = _read_record(window_id)
     if not record:
         return False
-    _kill_native_process_group(record)
+    _signal_native_process_group(record, signal.SIGTERM)
+    pid = record.get("pid")
+    if isinstance(pid, int) and pid > 0 and not _wait_for_pid_exit(pid, timeout=2.0):
+        _signal_native_process_group(record, signal.SIGKILL)
+        _wait_for_pid_exit(pid, timeout=1.0)
     mark_native_session_exited(window_id, exit_code=-1, ended_at=time.time())
     remove_native_session(window_id)
     return True
