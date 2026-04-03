@@ -127,7 +127,7 @@ def test_send_native_keys_writes_json_command_to_socket(
     )
 
 
-def test_kill_native_session_escalates_from_term_to_kill(
+def test_kill_native_session_uses_term_only_when_process_group_exits(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
@@ -153,7 +153,43 @@ def test_kill_native_session_escalates_from_term_to_kill(
 
     with (
         patch("ccgram.native_sessions.os.killpg") as mock_killpg,
-        patch("ccgram.native_sessions._wait_for_pid_exit", side_effect=[False, True]),
+        patch("ccgram.native_sessions._wait_for_process_group_exit", return_value=True),
+    ):
+        assert kill_native_session(window_id) is True
+
+    assert mock_killpg.call_args_list == [call(777, signal.SIGTERM)]
+
+
+def test_kill_native_session_escalates_from_term_to_kill_when_process_group_survives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}kill2"
+    snapshot_path = tmp_path / "native" / "kill2" / "snapshot.json"
+    control_path = tmp_path / "native" / "kill2" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="/dev/pts/9",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=120,
+        rows=40,
+        pid=1234,
+        process_group_id=777,
+        launcher_tty="/dev/pts/5",
+    )
+
+    with (
+        patch("ccgram.native_sessions.os.killpg") as mock_killpg,
+        patch(
+            "ccgram.native_sessions._wait_for_process_group_exit",
+            side_effect=[False, True],
+        ),
     ):
         assert kill_native_session(window_id) is True
 
@@ -161,6 +197,40 @@ def test_kill_native_session_escalates_from_term_to_kill(
         call(777, signal.SIGTERM),
         call(777, signal.SIGKILL),
     ]
+
+
+def test_kill_native_session_falls_back_to_pid_when_killpg_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}kill3"
+    snapshot_path = tmp_path / "native" / "kill3" / "snapshot.json"
+    control_path = tmp_path / "native" / "kill3" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="/dev/pts/9",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=120,
+        rows=40,
+        pid=1234,
+        process_group_id=777,
+        launcher_tty="/dev/pts/5",
+    )
+
+    with (
+        patch("ccgram.native_sessions.os.killpg", side_effect=OSError),
+        patch("ccgram.native_sessions.os.kill") as mock_kill,
+        patch("ccgram.native_sessions._wait_for_process_group_exit", return_value=True),
+    ):
+        assert kill_native_session(window_id) is True
+
+    mock_kill.assert_called_once_with(1234, signal.SIGTERM)
 
 
 def test_list_native_windows_hides_old_exited_sessions(
