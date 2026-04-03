@@ -2,6 +2,7 @@
 set -euo pipefail
 
 self_pid="$$"
+self_uid="$(id -u)"
 self_tty="$(ps -p "$self_pid" -o tty= | tr -d '[:space:]')"
 
 is_descendant_of_self() {
@@ -24,9 +25,36 @@ is_descendant_of_self() {
   return 1
 }
 
+is_ancestor_of_self() {
+  local target="$1"
+  local pid="$self_pid"
+  local ppid
+
+  while [[ -n "$pid" && "$pid" != "0" ]]; do
+    ppid="$(ps -o ppid= -p "$pid" | tr -d '[:space:]')"
+    if [[ -z "$ppid" || "$ppid" == "$pid" ]]; then
+      break
+    fi
+
+    if [[ "$ppid" == "$target" ]]; then
+      return 0
+    fi
+
+    pid="$ppid"
+  done
+
+  return 1
+}
+
+is_in_self_lineage() {
+  local pid="$1"
+
+  is_descendant_of_self "$pid" || is_ancestor_of_self "$pid"
+}
+
 mapfile -t rows < <(
-  ps -eo pid=,ppid=,pgid=,tty=,comm=,args= |
-    awk '$5 != "awk" && $5 != "bwrap" && (/ccgram notify launch --provider codex/ || /node \/usr\/bin\/codex/ || /\/codex\/codex( |$)/) { print }'
+  ps -eo pid=,ppid=,uid=,pgid=,tty=,comm=,args= |
+    awk -v self_uid="$self_uid" '$3 == self_uid && $6 != "awk" && $6 != "bwrap" && (/ccgram notify launch --provider codex/ || /node \/usr\/bin\/codex/ || /\/codex\/codex( |$)/) { print }'
 )
 
 if ((${#rows[@]} == 0)); then
@@ -37,9 +65,13 @@ fi
 found_candidate=0
 
 for row in "${rows[@]}"; do
-  read -r pid ppid pgid tty_name _args <<<"$row"
+  read -r pid ppid uid pgid tty_name _comm _args <<<"$row"
 
-  if [[ -z "${pid:-}" || -z "${pgid:-}" || -z "${tty_name:-}" ]]; then
+  if [[ -z "${pid:-}" || -z "${uid:-}" || -z "${pgid:-}" || -z "${tty_name:-}" ]]; then
+    continue
+  fi
+
+  if [[ "$uid" != "$self_uid" ]]; then
     continue
   fi
 
@@ -51,7 +83,7 @@ for row in "${rows[@]}"; do
     continue
   fi
 
-  if is_descendant_of_self "$pid"; then
+  if is_in_self_lineage "$pid"; then
     continue
   fi
 
