@@ -61,6 +61,7 @@ progress*.txt
 # Contributor tool dirs
 .serena
 .works
+.worktrees/
 
 # Dev run lock
 .ccgram-dev-run.lock.d/
