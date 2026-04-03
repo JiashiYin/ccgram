@@ -1166,10 +1166,7 @@ class TestUnboundCachedTopicProbe:
             mock_sm.resolve_chat_id.return_value = -100
             await _probe_unbound_cached_topics(bot)
 
-        bot.unpin_all_forum_topic_messages.assert_not_awaited()
-        bot.unpin_all_forum_topic_messages.assert_called_once_with(
-            chat_id=-100, message_thread_id=42
-        )
+        bot.unpin_all_forum_topic_messages.assert_not_called()
 
     @pytest.mark.parametrize(
         "exc",
