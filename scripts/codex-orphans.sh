@@ -6,6 +6,7 @@ self_uid="$(id -u)"
 
 declare -A pid_ppid
 declare -A pid_tty
+declare -A configured_codex_basenames
 declare -A self_ancestry
 declare -A self_lineage_cache
 declare -A live_ancestor_cache
@@ -21,35 +22,202 @@ declare -a group_order
 
 is_codex_path_token() {
   local token="${1,,}"
-  local basename stem
+  local basename
 
   basename="${token##*/}"
   basename="${basename#-}"
-  stem="$basename"
-  if [[ "$stem" == *.* ]]; then
-    stem="${stem%%.*}"
-  fi
 
-  case "$token" in
-    *"@openai/codex"*|*"/codex/"*)
-      return 0
-      ;;
-  esac
-
-  case "$stem" in
+  case "$basename" in
     codex)
       return 0
       ;;
+    codex.js|codex.mjs|codex.cjs)
+      case "$token" in
+        *"@openai/codex/"*)
+          return 0
+          ;;
+      esac
+      ;;
   esac
 
-  case "$basename" in
-    codex|codex.*)
+  case "$token" in
+    "@openai/codex"|@openai/codex@*)
       return 0
       ;;
   esac
 
-  case "$stem" in
-    *-codex-*|*-codex|*_codex_*|*_codex)
+  return 1
+}
+
+is_codex_wrapper_token() {
+  local token="${1,,}"
+  local basename
+
+  basename="${token##*/}"
+  basename="${basename#-}"
+
+  [[ "$basename" != *.* ]] || return 1
+
+  case "$basename" in
+    codex-*)
+      return 0
+      ;;
+  esac
+
+  if [[ -n "${configured_codex_basenames[$basename]:-}" ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+is_configured_codex_token() {
+  local token="${1,,}"
+  local basename
+
+  basename="${token##*/}"
+  basename="${basename#-}"
+
+  [[ -n "${configured_codex_basenames[$basename]:-}" ]]
+}
+
+load_configured_codex_basenames() {
+  local config_dir="${CCGRAM_DIR:-$HOME/.ccgram}"
+  local env_path raw_value="" line token basename lower wrapper="" subcommand=""
+  local skip_value=0
+  local i
+  local -a command_tokens=()
+
+  if [[ -n "${CCGRAM_CODEX_COMMAND:-}" ]]; then
+    raw_value="${CCGRAM_CODEX_COMMAND}"
+  else
+    for env_path in ".env" "$config_dir/.env" "$HOME/.ccbot/.env"; do
+      [[ -f "$env_path" ]] || continue
+      while IFS= read -r line; do
+        case "$line" in
+          CCGRAM_CODEX_COMMAND=*)
+            raw_value="${line#CCGRAM_CODEX_COMMAND=}"
+            ;;
+        esac
+      done < "$env_path"
+      [[ -n "$raw_value" ]] && break
+    done
+  fi
+
+  [[ -n "$raw_value" ]] || return 0
+
+  read -r -a command_tokens <<<"$raw_value"
+  for ((i = 0; i < ${#command_tokens[@]}; i++)); do
+    token="${command_tokens[i]}"
+    lower="${token,,}"
+
+    if (( skip_value == 1 )); then
+      skip_value=0
+      continue
+    fi
+
+    case "$wrapper" in
+      env)
+        if [[ "$lower" == -* ]]; then
+          continue
+        fi
+        if is_env_assignment_token "$token"; then
+          continue
+        fi
+        ;;
+      sudo|node|bun|npx|bunx)
+        if [[ "$lower" == -* ]]; then
+          if wrapper_option_takes_value "$wrapper" "$lower"; then
+            skip_value=1
+          fi
+          continue
+        fi
+        ;;
+      uv)
+        if [[ -z "$subcommand" ]]; then
+          if [[ "$lower" == -* ]]; then
+            if wrapper_option_takes_value "$wrapper" "$lower"; then
+              skip_value=1
+            fi
+            continue
+          fi
+          if [[ "$lower" == "run" ]]; then
+            subcommand="run"
+            continue
+          fi
+        elif [[ "$lower" == -* ]]; then
+          if wrapper_option_takes_value "$wrapper" "$lower"; then
+            skip_value=1
+          fi
+          continue
+        fi
+        ;;
+      python|python3)
+        if [[ "$lower" == "-m" ]]; then
+          if (( i + 1 < ${#command_tokens[@]} )); then
+            token="${command_tokens[i + 1]}"
+          fi
+        elif [[ "$lower" == -* ]]; then
+          if wrapper_option_takes_value "$wrapper" "$lower"; then
+            skip_value=1
+          fi
+          continue
+        fi
+        ;;
+    esac
+
+    lower="${token,,}"
+    basename="${lower##*/}"
+    basename="${basename#-}"
+
+    case "$basename" in
+      sudo|env|node|bun|npx|bunx|uv|python|python3)
+        wrapper="$basename"
+        subcommand=""
+        continue
+        ;;
+    esac
+
+    if [[ "$token" == *=* ]]; then
+      continue
+    fi
+
+    [[ -n "$basename" ]] || return 0
+    configured_codex_basenames["$basename"]=1
+    return 0
+  done
+}
+
+is_env_assignment_token() {
+  local token="$1"
+
+  [[ "$token" == *=* && "$token" != *= ]]
+}
+
+wrapper_option_takes_value() {
+  local wrapper="${1,,}"
+  local option="${2,,}"
+
+  case "$wrapper:$option" in
+    sudo:-u|sudo:-g|sudo:-h|sudo:-p|sudo:-c|sudo:-t|sudo:-r|sudo:-d|sudo:--user|sudo:--group|sudo:--host|sudo:--prompt|sudo:--close-from|sudo:--chdir|sudo:--role|sudo:--type|sudo:--preserve-env)
+      return 0
+      ;;
+    node:-r|node:--require|node:--loader|node:--import|node:-e|node:--eval)
+      return 0
+      ;;
+    bun:-r|bun:--require|bun:--loader|bun:--import|bun:-e|bun:--eval|bun:--cwd|bun:--config)
+      return 0
+      ;;
+    npx:-p|npx:--package|npx:-c|npx:--call)
+      return 0
+      ;;
+    bunx:-p|bunx:--package|bunx:-c|bunx:--call)
+      return 0
+      ;;
+    uv:--project|uv:--directory|uv:--python|uv:--with|uv:--env-file)
+      return 0
+      ;;
+    python:-c|python:-w|python:-x|python3:-c|python3:-w|python3:-x)
       return 0
       ;;
   esac
@@ -86,7 +254,9 @@ is_codex_like_command() {
   local comm="${1:-}"
   local args="${2:-}"
   local -a tokens=()
-  local token basename state=0
+  local token lower basename wrapper="" subcommand=""
+  local skip_value=0
+  local i
 
   if [[ -z "$args" ]]; then
     args="$comm"
@@ -101,31 +271,89 @@ is_codex_like_command() {
     return 0
   fi
 
-  for token in "${tokens[@]}"; do
-    token="${token,,}"
-    basename="${token##*/}"
+  for ((i = 0; i < ${#tokens[@]}; i++)); do
+    token="${tokens[i]}"
+    lower="${token,,}"
+    basename="${lower##*/}"
     basename="${basename#-}"
 
-    case "$state:$basename" in
-      0:sudo|0:env|0:node|0:bun|0:npx|0:bunx|0:uv)
-        continue
+    if (( skip_value == 1 )); then
+      skip_value=0
+      continue
+    fi
+
+    case "$wrapper" in
+      env)
+        if [[ "$lower" == -* ]]; then
+          continue
+        fi
+        if is_env_assignment_token "$token"; then
+          continue
+        fi
         ;;
-      0:python|0:python3)
-        state=1
-        continue
+      sudo|node|bun|npx|bunx)
+        if [[ "$lower" == -* ]]; then
+          if wrapper_option_takes_value "$wrapper" "$lower"; then
+            skip_value=1
+          fi
+          continue
+        fi
         ;;
-      1:m)
-        state=2
+      uv)
+        if [[ -z "$subcommand" ]]; then
+          if [[ "$lower" == -* ]]; then
+            if wrapper_option_takes_value "$wrapper" "$lower"; then
+              skip_value=1
+            fi
+            continue
+          fi
+          if [[ "$lower" == "run" ]]; then
+            subcommand="run"
+            continue
+          fi
+        elif [[ "$lower" == -* ]]; then
+          if wrapper_option_takes_value "$wrapper" "$lower"; then
+            skip_value=1
+          fi
+          continue
+        fi
+        ;;
+      python|python3)
+        if [[ "$lower" == "-m" ]]; then
+          if (( i + 1 < ${#tokens[@]} )); then
+            if is_codex_path_token "${tokens[i + 1]}" || is_configured_codex_token "${tokens[i + 1]}"; then
+              return 0
+            fi
+          fi
+          return 1
+        fi
+        if [[ "$lower" == -* ]]; then
+          if wrapper_option_takes_value "$wrapper" "$lower"; then
+            skip_value=1
+          fi
+          continue
+        fi
+        if is_codex_path_token "$token" || is_configured_codex_token "$token"; then
+          return 0
+        fi
+        return 1
+        ;;
+    esac
+
+    case "$basename" in
+      sudo|env|node|bun|npx|bunx|uv|python|python3)
+        wrapper="$basename"
+        subcommand=""
         continue
         ;;
     esac
 
-    if is_codex_path_token "$token"; then
+    if is_codex_path_token "$token" || is_configured_codex_token "$token"; then
       return 0
     fi
 
-    if (( state == 1 || state == 2 )); then
-      return 1
+    if [[ "$wrapper" != "node" && "$wrapper" != "bun" && "$wrapper" != "npx" && "$wrapper" != "bunx" && "$wrapper" != "python" && "$wrapper" != "python3" ]] && is_codex_wrapper_token "$token"; then
+      return 0
     fi
 
     return 1
@@ -230,6 +458,8 @@ pid_has_live_ancestor() {
   live_ancestor_cache["$pid"]=1
   return 1
 }
+
+load_configured_codex_basenames
 
 while IFS= read -r row; do
   [[ -n "$row" ]] || continue
