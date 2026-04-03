@@ -26,6 +26,7 @@ from ccgram.handlers.status_polling import (
     _pane_alert_hashes,
     _parse_with_pyte,
     _probe_topic_existence,
+    _probe_unbound_cached_topics,
     _prune_stale_state,
     _scan_window_panes,
     _start_autoclose_timer,
@@ -1127,6 +1128,45 @@ class TestProbeFailures:
             _window_poll_state.get("@5") is None
             or _window_poll_state["@5"].probe_failures == 0
         )
+
+
+class TestUnboundCachedTopicProbe:
+    async def test_deleted_unbound_cached_topic_is_pruned(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        bot.unpin_all_forum_topic_messages.side_effect = BadRequest("Topic_id_invalid")
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.iter_stored_topic_names",
+                return_value=[(-100, 2259, "workspace [@Jacob_CodexBot]")],
+            ),
+            patch("ccgram.handlers.status_polling.clear_topic_emoji_state") as mock_clear,
+        ):
+            mock_sm.iter_thread_bindings.return_value = []
+            await _probe_unbound_cached_topics(bot)
+
+        bot.unpin_all_forum_topic_messages.assert_awaited_once_with(
+            chat_id=-100,
+            message_thread_id=2259,
+        )
+        mock_clear.assert_called_once_with(-100, 2259)
+
+    async def test_bound_topics_are_skipped_by_unbound_probe(self) -> None:
+        bot = AsyncMock(spec=Bot)
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.iter_stored_topic_names",
+                return_value=[(-100, 42, "NPU [@Jacob_localCodexBot]")],
+            ),
+        ):
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@5")]
+            mock_sm.resolve_chat_id.return_value = -100
+            await _probe_unbound_cached_topics(bot)
+
+        bot.unpin_all_forum_topic_messages.assert_not_awaited()
         bot.unpin_all_forum_topic_messages.assert_called_once_with(
             chat_id=-100, message_thread_id=42
         )

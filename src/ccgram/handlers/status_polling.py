@@ -72,7 +72,12 @@ from .message_sender import rate_limit_send_message
 from .recovery_callbacks import build_recovery_keyboard
 from .response_builder import build_response_parts
 from .topic_delivery import recreate_notify_topic_binding
-from .topic_emoji import update_stored_topic_name, update_topic_emoji
+from .topic_emoji import (
+    clear_topic_emoji_state,
+    iter_stored_topic_names,
+    update_stored_topic_name,
+    update_topic_emoji,
+)
 
 # Top-level loop resilience: catch any error to keep polling alive
 _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
@@ -1384,6 +1389,42 @@ async def _probe_topic_existence(bot: Bot) -> None:
                     )
 
 
+async def _probe_unbound_cached_topics(bot: Bot) -> None:
+    """Probe cached unbound topic markers and purge ones Telegram no longer has."""
+    bound_topics = {
+        (session_manager.resolve_chat_id(user_id, thread_id), thread_id)
+        for user_id, thread_id, _wid in session_manager.iter_thread_bindings()
+    }
+    for chat_id, thread_id, _name in iter_stored_topic_names():
+        if (chat_id, thread_id) in bound_topics:
+            continue
+        try:
+            await bot.unpin_all_forum_topic_messages(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+            )
+        except TelegramError as e:
+            if isinstance(e, BadRequest) and (
+                "Topic_id_invalid" in e.message
+                or "thread not found" in e.message.lower()
+            ):
+                clear_topic_emoji_state(chat_id, thread_id)
+                logger.info(
+                    "Pruned deleted cached topic marker: chat=%d thread=%d",
+                    chat_id,
+                    thread_id,
+                )
+            else:
+                log_throttled(
+                    logger,
+                    f"unbound-topic-probe:{chat_id}:{thread_id}",
+                    "Unbound topic probe error for %d:%d: %s",
+                    chat_id,
+                    thread_id,
+                    e,
+                )
+
+
 async def _maybe_check_passive_shell(
     bot: Bot, user_id: int, window_id: str, thread_id: int
 ) -> None:
@@ -1616,6 +1657,7 @@ async def status_poll_loop(bot: Bot) -> None:
                 await _cleanup_duplicate_notify_bindings(bot)
                 await _cleanup_stale_bound_shell_windows(bot, all_windows)
                 await _probe_topic_existence(bot)
+                await _probe_unbound_cached_topics(bot)
                 # Sweep stale log-throttle entries to prevent unbounded growth
                 log_throttle_sweep()
 

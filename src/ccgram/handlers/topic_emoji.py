@@ -354,6 +354,11 @@ def get_stored_topic_name(chat_id: int, thread_id: int) -> str | None:
     return _topic_names.get((chat_id, thread_id))
 
 
+def iter_stored_topic_names() -> list[tuple[int, int, str]]:
+    """Return a snapshot of persisted topic-name cache entries."""
+    return [(chat_id, thread_id, name) for (chat_id, thread_id), name in _topic_names.items()]
+
+
 def clear_topic_emoji_state(chat_id: int, thread_id: int) -> None:
     """Clear emoji tracking for a topic (called on topic cleanup)."""
     key = (chat_id, thread_id)
