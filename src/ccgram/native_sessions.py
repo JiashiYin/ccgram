@@ -7,6 +7,7 @@ for the background bridge to detect blockers and inject responses from Telegram.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import pty
@@ -37,6 +38,7 @@ logger = structlog.get_logger()
 
 NATIVE_WINDOW_PREFIX = "native:"
 _REGISTRY_FILE = "native-sessions.json"
+_REGISTRY_LOCK_FILE = "native-sessions.lock"
 _RETENTION_SECS = 300.0
 _RAW_HISTORY_LIMIT = 200_000
 _CONTROL_SOCKET_GRACE_SECS = 5.0
@@ -83,6 +85,22 @@ def _registry_path() -> Path:
     return ccgram_dir() / _REGISTRY_FILE
 
 
+def _registry_lock_path() -> Path:
+    return ccgram_dir() / _REGISTRY_LOCK_FILE
+
+
+@contextlib.contextmanager
+def _registry_lock():
+    path = _registry_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+") as lock_f:  # noqa: SIM115 - lock file stays open
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+
 def _native_session_dir(session_key: str) -> Path:
     return ccgram_dir() / "native" / session_key
 
@@ -108,15 +126,16 @@ def _save_registry(data: dict[str, Any]) -> None:
 
 
 def _update_record(window_id: str, **changes: object) -> None:
-    data = _load_registry()
-    sessions = data.setdefault("sessions", {})
-    assert isinstance(sessions, dict)
-    record = sessions.get(window_id)
-    if not isinstance(record, dict):
-        return
-    record.update(changes)
-    sessions[window_id] = record
-    _save_registry(data)
+    with _registry_lock():
+        data = _load_registry()
+        sessions = data.setdefault("sessions", {})
+        assert isinstance(sessions, dict)
+        record = sessions.get(window_id)
+        if not isinstance(record, dict):
+            return
+        record.update(changes)
+        sessions[window_id] = record
+        _save_registry(data)
 
 
 def _pid_is_running(pid: object) -> bool:
@@ -220,70 +239,77 @@ def register_native_session(
     launcher_tty: str = "",
 ) -> None:
     """Persist a newly launched native session."""
-    data = _load_registry()
-    sessions = data.setdefault("sessions", {})
-    assert isinstance(sessions, dict)
-    sessions[window_id] = {
-        "window_id": window_id,
-        "window_name": window_name,
-        "cwd": cwd,
-        "provider_name": provider_name,
-        "pane_current_command": pane_current_command,
-        "pane_tty": pane_tty,
-        "snapshot_path": str(snapshot_path),
-        "control_socket_path": str(control_socket_path),
-        "columns": columns,
-        "rows": rows,
-        "pid": pid,
-        "process_group_id": process_group_id if process_group_id is not None else pid,
-        "bridge_pid": os.getpid(),
-        "launcher_tty": launcher_tty,
-        "orphaned_at": None,
-        "running": True,
-        "started_at": time.time(),
-        "ended_at": None,
-        "exit_code": None,
-    }
-    _save_registry(data)
+    with _registry_lock():
+        data = _load_registry()
+        sessions = data.setdefault("sessions", {})
+        assert isinstance(sessions, dict)
+        sessions[window_id] = {
+            "window_id": window_id,
+            "window_name": window_name,
+            "cwd": cwd,
+            "provider_name": provider_name,
+            "pane_current_command": pane_current_command,
+            "pane_tty": pane_tty,
+            "snapshot_path": str(snapshot_path),
+            "control_socket_path": str(control_socket_path),
+            "columns": columns,
+            "rows": rows,
+            "pid": pid,
+            "process_group_id": process_group_id if process_group_id is not None else pid,
+            "bridge_pid": os.getpid(),
+            "launcher_tty": launcher_tty,
+            "orphaned_at": None,
+            "running": True,
+            "started_at": time.time(),
+            "ended_at": None,
+            "exit_code": None,
+        }
+        _save_registry(data)
 
 
 def find_orphaned_native_sessions(
     *, now: float | None = None, grace_secs: float = 30.0
 ) -> list[NativeOrphan]:
     ts = time.time() if now is None else now
-    data = _load_registry()
-    sessions = data.get("sessions", {})
     orphans: list[NativeOrphan] = []
-    if not isinstance(sessions, dict):
-        return orphans
-    for window_id, record in sessions.items():
-        if not isinstance(record, dict) or not record.get("running", False):
-            continue
-        if not _pid_is_running(record.get("pid")):
-            continue
-        if not _has_live_control_channel(record, now=ts):
-            continue
-        bridge_terminal = _bridge_has_live_terminal(record)
-        if bridge_terminal is True:
-            record["orphaned_at"] = None
-            continue
-        orphaned_at = record.get("orphaned_at")
-        if not isinstance(orphaned_at, (int, float)):
-            if bridge_terminal is False:
-                record["orphaned_at"] = ts
-            continue
-        if ts - float(orphaned_at) < grace_secs:
-            continue
-        orphans.append(
-            NativeOrphan(
-                window_id=window_id,
-                window_name=str(record.get("window_name", "")),
-                pid=int(record.get("pid") or 0),
-                process_group_id=int(record.get("process_group_id") or 0),
-                reason="launcher terminal disappeared",
+    dirty = False
+    with _registry_lock():
+        data = _load_registry()
+        sessions = data.get("sessions", {})
+        if not isinstance(sessions, dict):
+            return orphans
+        for window_id, record in sessions.items():
+            if not isinstance(record, dict) or not record.get("running", False):
+                continue
+            if not _pid_is_running(record.get("pid")):
+                continue
+            if not _has_live_control_channel(record, now=ts):
+                continue
+            bridge_terminal = _bridge_has_live_terminal(record)
+            if bridge_terminal is True:
+                if record.get("orphaned_at") is not None:
+                    record["orphaned_at"] = None
+                    dirty = True
+                continue
+            orphaned_at = record.get("orphaned_at")
+            if not isinstance(orphaned_at, (int, float)):
+                if bridge_terminal is False:
+                    record["orphaned_at"] = ts
+                    dirty = True
+                continue
+            if ts - float(orphaned_at) < grace_secs:
+                continue
+            orphans.append(
+                NativeOrphan(
+                    window_id=window_id,
+                    window_name=str(record.get("window_name", "")),
+                    pid=int(record.get("pid") or 0),
+                    process_group_id=int(record.get("process_group_id") or 0),
+                    reason="launcher terminal disappeared",
+                )
             )
-        )
-    _save_registry(data)
+        if dirty:
+            _save_registry(data)
     return orphans
 
 
@@ -384,25 +410,26 @@ def _wait_for_process_group_exit(record: dict[str, Any], *, timeout: float) -> b
 
 def remove_native_session(window_id: str) -> None:
     """Remove a native session from the registry and delete its local artifacts."""
-    data = _load_registry()
-    sessions = data.get("sessions", {})
-    if not isinstance(sessions, dict):
-        return
-    record = sessions.pop(window_id, None)
-    if isinstance(record, dict):
-        cleanup_dirs: set[Path] = set()
-        for key in ("control_socket_path", "snapshot_path"):
-            raw_path = record.get(key)
-            if not isinstance(raw_path, str) or not raw_path:
-                continue
-            path = Path(raw_path)
-            with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
-            cleanup_dirs.add(path.parent)
-        for directory in cleanup_dirs:
-            with contextlib.suppress(OSError):
-                directory.rmdir()
-    _save_registry(data)
+    with _registry_lock():
+        data = _load_registry()
+        sessions = data.get("sessions", {})
+        if not isinstance(sessions, dict):
+            return
+        record = sessions.pop(window_id, None)
+        if isinstance(record, dict):
+            cleanup_dirs: set[Path] = set()
+            for key in ("control_socket_path", "snapshot_path"):
+                raw_path = record.get(key)
+                if not isinstance(raw_path, str) or not raw_path:
+                    continue
+                path = Path(raw_path)
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+                cleanup_dirs.add(path.parent)
+            for directory in cleanup_dirs:
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
+        _save_registry(data)
 
 
 def kill_native_session(window_id: str) -> bool:
@@ -429,59 +456,77 @@ def list_native_windows(
     explicitly requested.
     """
     ts = time.time() if now is None else now
-    data = _load_registry()
-    sessions = data.get("sessions", {})
-    if not isinstance(sessions, dict):
-        return []
-
     windows: list[NativeWindow] = []
-    stale: list[str] = []
-    for window_id, record in sessions.items():
-        if not isinstance(record, dict):
-            continue
-        running = bool(record.get("running", False))
-        agent_pid = record.get("pid")
-        bridge_pid = record.get("bridge_pid")
-        if running and (
-            not _pid_is_running(agent_pid)
-            or (
-                bridge_pid is not None
-                and not _pid_is_running(bridge_pid)
-            )
-            or not _has_live_control_channel(record, now=ts)
-        ):
-            _kill_native_process_group(record)
-            mark_native_session_exited(window_id, exit_code=-1, ended_at=ts)
-            record["running"] = False
-            record["ended_at"] = ts
-            record["exit_code"] = -1
-            running = False
-        ended_at = record.get("ended_at")
-        if (
-            not running
-            and isinstance(ended_at, (int, float))
-            and ts - float(ended_at) > _RETENTION_SECS
-        ):
-            stale.append(window_id)
-            continue
-        if not running and not include_exited:
-            continue
+    dirty = False
+    with _registry_lock():
+        data = _load_registry()
+        sessions = data.get("sessions", {})
+        if not isinstance(sessions, dict):
+            return []
 
-        windows.append(
-            NativeWindow(
-                window_id=window_id,
-                window_name=str(record.get("window_name", "")),
-                cwd=str(record.get("cwd", "")),
-                pane_current_command=str(record.get("pane_current_command", "")),
-                pane_tty=str(record.get("pane_tty", "")),
-                pane_width=int(record.get("columns", 0) or 0),
-                pane_height=int(record.get("rows", 0) or 0),
-            )
-        )
+        stale: list[str] = []
+        for window_id, record in list(sessions.items()):
+            if not isinstance(record, dict):
+                continue
+            running = bool(record.get("running", False))
+            agent_pid = record.get("pid")
+            bridge_pid = record.get("bridge_pid")
+            if running and (
+                not _pid_is_running(agent_pid)
+                or (
+                    bridge_pid is not None
+                    and not _pid_is_running(bridge_pid)
+                )
+                or not _has_live_control_channel(record, now=ts)
+            ):
+                _kill_native_process_group(record)
+                record["running"] = False
+                record["ended_at"] = ts
+                record["exit_code"] = -1
+                dirty = True
+                running = False
+            ended_at = record.get("ended_at")
+            if (
+                not running
+                and isinstance(ended_at, (int, float))
+                and ts - float(ended_at) > _RETENTION_SECS
+            ):
+                stale.append(window_id)
+                continue
+            if not running and not include_exited:
+                continue
 
-    if stale:
-        for window_id in stale:
-            remove_native_session(window_id)
+            windows.append(
+                NativeWindow(
+                    window_id=window_id,
+                    window_name=str(record.get("window_name", "")),
+                    cwd=str(record.get("cwd", "")),
+                    pane_current_command=str(record.get("pane_current_command", "")),
+                    pane_tty=str(record.get("pane_tty", "")),
+                    pane_width=int(record.get("columns", 0) or 0),
+                    pane_height=int(record.get("rows", 0) or 0),
+                )
+            )
+
+        if stale:
+            for window_id in stale:
+                record = sessions.pop(window_id, None)
+                if isinstance(record, dict):
+                    cleanup_dirs: set[Path] = set()
+                    for key in ("control_socket_path", "snapshot_path"):
+                        raw_path = record.get(key)
+                        if not isinstance(raw_path, str) or not raw_path:
+                            continue
+                        path = Path(raw_path)
+                        with contextlib.suppress(OSError):
+                            path.unlink(missing_ok=True)
+                        cleanup_dirs.add(path.parent)
+                    for directory in cleanup_dirs:
+                        with contextlib.suppress(OSError):
+                            directory.rmdir()
+                dirty = True
+        if dirty:
+            _save_registry(data)
     return windows
 
 

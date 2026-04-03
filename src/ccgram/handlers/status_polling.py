@@ -49,7 +49,7 @@ from ..providers import (
     should_probe_pane_title_for_provider_detection,
 )
 from ..providers.base import StatusUpdate
-from ..native_sessions import find_orphaned_native_sessions, kill_native_session
+from ..native_sessions import find_orphaned_native_sessions
 from ..session import session_manager
 from ..window_resolver import is_foreign_window
 from ..session_monitor import get_active_monitor
@@ -564,8 +564,8 @@ async def _cleanup_dead_notify_window(bot: Bot, window_id: str) -> None:
 
 async def _cleanup_orphaned_native_sessions(bot: Bot) -> None:
     """Sweep confirmed orphaned native sessions and clean up their bindings."""
-    for orphan in find_orphaned_native_sessions():
-        if not kill_native_session(orphan.window_id):
+    for orphan in await asyncio.to_thread(find_orphaned_native_sessions):
+        if not await tmux_manager.kill_window(orphan.window_id):
             continue
         await _cleanup_dead_notify_window(bot, orphan.window_id)
         logger.warning(

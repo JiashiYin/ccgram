@@ -41,6 +41,7 @@ from ccgram.handlers.status_polling import (
     is_shell_prompt,
     reset_screen_buffer_state,
 )
+from ccgram.native_sessions import find_orphaned_native_sessions
 from ccgram.session import AuditIssue, AuditResult
 from ccgram.tmux_manager import PaneInfo
 
@@ -190,22 +191,24 @@ class TestAutocloseTimers:
 
         with (
             patch(
-                "ccgram.handlers.status_polling.find_orphaned_native_sessions",
-                return_value=[orphan],
-            ),
+                "ccgram.handlers.status_polling.asyncio.to_thread",
+                new=AsyncMock(),
+            ) as mock_to_thread,
             patch(
-                "ccgram.handlers.status_polling.kill_native_session",
-                return_value=True,
+                "ccgram.handlers.status_polling.tmux_manager.kill_window",
+                new=AsyncMock(return_value=True),
             ) as mock_kill,
             patch(
                 "ccgram.handlers.status_polling._cleanup_dead_notify_window",
                 new=AsyncMock(),
             ) as mock_cleanup,
         ):
+            mock_to_thread.return_value = [orphan]
             await _cleanup_orphaned_native_sessions(bot)
 
-        mock_kill.assert_called_once_with("native:abc")
+        mock_kill.assert_awaited_once_with("native:abc")
         mock_cleanup.assert_awaited_once_with(bot, "native:abc")
+        mock_to_thread.assert_awaited_once_with(find_orphaned_native_sessions)
 
     @pytest.mark.asyncio
     async def test_cleanup_orphaned_native_sessions_skips_empty_sweep(self) -> None:
@@ -213,14 +216,24 @@ class TestAutocloseTimers:
 
         with (
             patch(
-                "ccgram.handlers.status_polling.find_orphaned_native_sessions",
-                return_value=[],
-            ),
-            patch("ccgram.handlers.status_polling.kill_native_session") as mock_kill,
+                "ccgram.handlers.status_polling.asyncio.to_thread",
+                new=AsyncMock(),
+            ) as mock_to_thread,
+            patch(
+                "ccgram.handlers.status_polling.tmux_manager.kill_window",
+                new=AsyncMock(),
+            ) as mock_kill,
+            patch(
+                "ccgram.handlers.status_polling._cleanup_dead_notify_window",
+                new=AsyncMock(),
+            ) as mock_cleanup,
         ):
+            mock_to_thread.return_value = []
             await _cleanup_orphaned_native_sessions(bot)
 
-        mock_kill.assert_not_called()
+        mock_kill.assert_not_awaited()
+        mock_cleanup.assert_not_awaited()
+        mock_to_thread.assert_awaited_once_with(find_orphaned_native_sessions)
 
 
 class TestTranscriptActivityHeuristic:
