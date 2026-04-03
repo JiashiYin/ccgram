@@ -235,6 +235,7 @@ If multiple CCGram bots share the same Telegram group:
 
 - bot-created topics remember their creator as the default responder
 - user-created shared topics need one explicit leading mention first, such as `@YourBotUsername fix the tests`
+- until a shared topic has an explicit owner marker, unaddressed messages are ignored instead of letting another bot hijack the topic
 - after that first explicit message, the topic remembers that bot as the default responder using a visible topic-name marker like `[@YourBotUsername]`
 - once the marker is set, unaddressed messages route only to that bot
 

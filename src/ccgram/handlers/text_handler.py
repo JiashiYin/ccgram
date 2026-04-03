@@ -260,14 +260,6 @@ async def _handle_unbound_topic(
     )
     if decision == "ignore":
         return True
-    if decision == "prompt":
-        await safe_reply(
-            message,
-            "Multiple bots are available in this topic. Start by addressing one explicitly, "
-            f"for example `@{bot_username} ...`. Once a bot is addressed explicitly, this "
-            "topic will remember it as the default responder.",
-        )
-        return True
     if should_claim_default and user_data is not None and bot_username:
         user_data[PENDING_TOPIC_DEFAULT_BOT] = bot_username
 
@@ -495,14 +487,6 @@ async def _gate_topic_targeting(
         explicit_self_target=explicit_target is not None,
     )
     if decision == "ignore":
-        return True, bot_username, False
-    if decision == "prompt":
-        await safe_reply(
-            message,
-            "Multiple bots are available in this topic. Start by addressing one explicitly, "
-            f"for example `@{bot_username} ...`. Once a bot is addressed explicitly, this "
-            "topic will remember it as the default responder.",
-        )
         return True, bot_username, False
     return False, bot_username, claim_default
 

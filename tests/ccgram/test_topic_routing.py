@@ -6,7 +6,6 @@ import pytest
 
 from ccgram.handlers.topic_routing import (
     classify_topic_routing,
-    designated_prompt_owner,
     extract_default_responder,
     format_topic_name_with_default_responder,
     has_legacy_default_responder,
@@ -34,10 +33,6 @@ class TestTopicRoutingMarkers:
             == "helloworld [@BotOne]"
         )
 
-    def test_designated_prompt_owner_uses_stable_order(self) -> None:
-        assert designated_prompt_owner(("@zbot", "@Abot")) == "@Abot"
-
-
 class TestClassifyTopicRouting:
     @pytest.mark.asyncio
     async def test_single_bot_chat_handles_unaddressed_message(self) -> None:
@@ -59,7 +54,7 @@ class TestClassifyTopicRouting:
         assert claim_default is False
 
     @pytest.mark.asyncio
-    async def test_shared_chat_prompts_only_designated_owner_when_unmarked(self) -> None:
+    async def test_shared_chat_ignores_unaddressed_message_when_unmarked(self) -> None:
         bot = MagicMock()
         with patch(
             "ccgram.handlers.topic_routing.get_admin_bot_usernames",
@@ -74,7 +69,7 @@ class TestClassifyTopicRouting:
                 explicit_self_target=False,
             )
 
-        assert decision == "prompt"
+        assert decision == "ignore"
         assert claim_default is False
 
     @pytest.mark.asyncio

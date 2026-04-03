@@ -202,14 +202,14 @@ class TestHandleUnboundTopic:
     @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)
     @patch(f"{_TH}.classify_topic_routing", new_callable=AsyncMock)
     @patch(f"{_TH}.session_manager")
-    async def test_shared_chat_prompt_owner_blocks_unbound_setup_until_explicit_target(
+    async def test_shared_chat_unbound_topic_is_ignored_until_explicit_target(
         self,
         mock_sm: MagicMock,
         mock_route: AsyncMock,
         mock_reply: AsyncMock,
     ) -> None:
         mock_sm.get_window_for_thread.return_value = None
-        mock_route.return_value = ("prompt", False)
+        mock_route.return_value = ("ignore", False)
 
         user_data: dict = {}
         message = MagicMock()
@@ -219,8 +219,7 @@ class TestHandleUnboundTopic:
         result = await _handle_unbound_topic(100, 42, "hello", user_data, message)
 
         assert result is True
-        mock_reply.assert_called_once()
-        assert "Multiple bots are available" in mock_reply.call_args.args[1]
+        mock_reply.assert_not_called()
         assert PENDING_THREAD_ID not in user_data
 
     @patch(f"{_TH}.safe_reply", new_callable=AsyncMock)

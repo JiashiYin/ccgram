@@ -351,14 +351,6 @@ async def _gate_command_topic_targeting(
     )
     if decision == "ignore":
         return True, bot_username, False
-    if decision == "prompt":
-        await safe_reply(
-            message,
-            "Multiple bots are available in this topic. Start by addressing one explicitly, "
-            f"for example `@{bot_username} /status`. Once a bot is addressed explicitly, this "
-            "topic will remember it as the default responder.",
-        )
-        return True, bot_username, False
     return False, bot_username, claim_default
 
 

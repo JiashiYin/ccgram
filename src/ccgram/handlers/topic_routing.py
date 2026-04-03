@@ -19,9 +19,10 @@ _CHAT_BOT_CACHE_TTL_SECONDS = 60.0
 _chat_bot_cache: dict[int, tuple[float, tuple[str, ...]]] = {}
 
 
-def extract_default_responder(display_name: str) -> tuple[str, str | None]:
+def extract_default_responder(display_name: str | object) -> tuple[str, str | None]:
     """Return the base topic name and optional explicit default responder."""
-    clean = strip_emoji_prefix(display_name).strip()
+    clean_name = display_name if isinstance(display_name, str) else ""
+    clean = strip_emoji_prefix(clean_name).strip()
     match = _DEFAULT_RESPONDER_RE.match(clean)
     if not match:
         return clean, None
@@ -108,13 +109,6 @@ async def get_admin_bot_usernames(bot: Bot, chat_id: int) -> tuple[str, ...]:
     return result
 
 
-def designated_prompt_owner(bot_usernames: tuple[str, ...]) -> str | None:
-    """Return the deterministic bot that should prompt in ambiguous topics."""
-    if not bot_usernames:
-        return None
-    return sorted(bot_usernames, key=str.casefold)[0]
-
-
 async def classify_topic_routing(
     *,
     bot: Bot,
@@ -122,7 +116,7 @@ async def classify_topic_routing(
     display_name: str,
     bot_username: str | None,
     explicit_self_target: bool,
-) -> tuple[Literal["handle", "ignore", "prompt"], bool]:
+) -> tuple[Literal["handle", "ignore"], bool]:
     """Classify whether this bot should handle an incoming topic message.
 
     Returns ``(decision, should_claim_topic_default)`` where claim_default
@@ -145,9 +139,6 @@ async def classify_topic_routing(
         return "ignore", False
 
     if shared_chat:
-        prompt_owner = designated_prompt_owner(bot_usernames)
-        if bot_username and prompt_owner and prompt_owner.casefold() == f"@{bot_username}".casefold():
-            return "prompt", False
         return "ignore", False
 
     return "handle", False
