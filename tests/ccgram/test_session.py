@@ -831,6 +831,18 @@ class TestSyncDisplayNames:
         assert changed is True
         assert mgr.get_display_name("@1") == "new-name"
 
+    def test_preserves_owner_marker_when_live_name_matches_base(
+        self, mgr: SessionManager
+    ) -> None:
+        mgr.window_display_names["native:abc"] = "NPU [@Jacob_localCodexBot]"
+
+        changed = mgr.sync_display_names([("native:abc", "NPU")])
+
+        assert changed is False
+        assert (
+            mgr.get_display_name("native:abc") == "NPU [@Jacob_localCodexBot]"
+        )
+
     def test_updates_window_state_too(self, mgr: SessionManager) -> None:
         mgr.window_display_names["@1"] = "old-name"
         mgr.window_states["@1"] = WindowState(window_name="old-name")

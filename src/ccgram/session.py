@@ -438,6 +438,12 @@ class SessionManager:
         for window_id, window_name in live_windows:
             old = self.window_display_names.get(window_id)
             if old and old != window_name:
+                from .handlers.topic_routing import extract_default_responder
+
+                old_base, old_owner = extract_default_responder(old)
+                live_base, live_owner = extract_default_responder(window_name)
+                if old_owner and live_owner is None and old_base == live_base:
+                    continue
                 self.window_display_names[window_id] = window_name
                 ws = self.window_states.get(window_id)
                 if ws:

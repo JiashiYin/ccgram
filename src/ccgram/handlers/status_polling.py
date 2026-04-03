@@ -72,7 +72,7 @@ from .message_sender import rate_limit_send_message
 from .recovery_callbacks import build_recovery_keyboard
 from .response_builder import build_response_parts
 from .topic_delivery import recreate_notify_topic_binding
-from .topic_emoji import update_topic_emoji
+from .topic_emoji import update_stored_topic_name, update_topic_emoji
 
 # Top-level loop resilience: catch any error to keep polling alive
 _LoopError = (TelegramError, OSError, RuntimeError, ValueError)
@@ -565,6 +565,51 @@ async def _handle_missing_window(
     await _cleanup_dead_notify_window(bot, wid)
 
 
+async def _ensure_topic_owner_marker(
+    bot: Bot,
+    chat_id: int,
+    thread_id: int,
+    window_id: str,
+    display: str,
+) -> str:
+    """Ensure shared bound topics keep an explicit default responder marker."""
+    if chat_id >= 0:
+        return display
+
+    from .topic_routing import (
+        extract_default_responder,
+        format_topic_name_with_default_responder,
+        get_admin_bot_usernames,
+    )
+
+    _base, owner = extract_default_responder(display)
+    if owner:
+        return display
+
+    bot_username = getattr(bot, "username", None)
+    if not bot_username:
+        return display
+
+    bot_usernames = await get_admin_bot_usernames(bot, chat_id)
+    if len(bot_usernames) <= 1:
+        return display
+
+    claimed = format_topic_name_with_default_responder(display, bot_username)
+    if claimed == display:
+        return display
+
+    session_manager.set_display_name(window_id, claimed)
+    update_stored_topic_name(chat_id, thread_id, claimed)
+    logger.info(
+        "Restored topic owner marker: chat=%d thread=%d window=%s name=%r",
+        chat_id,
+        thread_id,
+        window_id,
+        claimed,
+    )
+    return claimed
+
+
 async def _transition_to_idle(
     bot: Bot,
     user_id: int,
@@ -578,6 +623,9 @@ async def _transition_to_idle(
     ws = _get_window_state(window_id)
     ws.startup_time = None
     ws.missing_polls = 0
+    display = await _ensure_topic_owner_marker(
+        bot, chat_id, thread_id, window_id, display
+    )
     # Keep live sessions green during ordinary idle gaps. Yellow should be
     # reserved for genuinely attention-seeking states, not brief inactivity.
     await update_topic_emoji(bot, chat_id, thread_id, "active", display)
@@ -616,7 +664,13 @@ async def _handle_no_status(
         await _send_typing_throttled(bot, user_id, thread_id)
         if thread_id is not None:
             chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-            display = session_manager.get_display_name(window_id)
+            display = await _ensure_topic_owner_marker(
+                bot,
+                chat_id,
+                thread_id,
+                window_id,
+                session_manager.get_display_name(window_id),
+            )
             await update_topic_emoji(bot, chat_id, thread_id, "active", display)
             _clear_autoclose_if_active(user_id, thread_id)
         return
@@ -625,7 +679,13 @@ async def _handle_no_status(
         return
 
     chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-    display = session_manager.get_display_name(window_id)
+    display = await _ensure_topic_owner_marker(
+        bot,
+        chat_id,
+        thread_id,
+        window_id,
+        session_manager.get_display_name(window_id),
+    )
     ws = _get_window_state(window_id)
 
     if is_shell_prompt(pane_current_command):
@@ -1046,7 +1106,13 @@ async def update_status_message(
         # Update topic emoji to active (agent is working)
         if thread_id is not None:
             chat_id = session_manager.resolve_chat_id(user_id, thread_id)
-            display = session_manager.get_display_name(window_id)
+            display = await _ensure_topic_owner_marker(
+                bot,
+                chat_id,
+                thread_id,
+                window_id,
+                session_manager.get_display_name(window_id),
+            )
             await update_topic_emoji(bot, chat_id, thread_id, "active", display)
             _clear_autoclose_if_active(user_id, thread_id)
     else:
