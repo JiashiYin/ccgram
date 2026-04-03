@@ -21,7 +21,8 @@ def _make_update(*, thread_id: int = 42, user_id: int = 100, chat_id: int = -100
     message.message_thread_id = thread_id
     message.chat.id = chat_id
     message.chat.type = "supergroup"
-    message.forum_topic_created = MagicMock(name="ops")
+    message.forum_topic_created = MagicMock()
+    message.forum_topic_created.name = "ops"
     update.message = message
     return update
 
@@ -55,3 +56,20 @@ class TestTopicCreatedHandler:
             context.user_data,
             update.message,
         )
+
+    @patch("ccgram.bot.is_user_allowed", return_value=False)
+    @patch("ccgram.bot._handle_unbound_topic", new_callable=AsyncMock)
+    async def test_caches_bot_created_topic_without_prompting(
+        self,
+        mock_handle_unbound: AsyncMock,
+        _allowed: MagicMock,
+    ) -> None:
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        update = _make_update(user_id=999)
+        context = _make_context()
+
+        await topic_created_handler(update, context)
+
+        assert _topic_names[(-100999, 42)] == "ops"
+        mock_handle_unbound.assert_not_awaited()

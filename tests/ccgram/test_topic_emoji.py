@@ -315,6 +315,18 @@ class TestTopicNamePreservation:
             name=f"{EMOJI_IDLE} renamed",
         )
 
+    async def test_preserves_existing_owner_marker_when_display_name_is_plain(self) -> None:
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        _topic_names[(-100, 42)] = "NPU [@Jacob_localCodexBot]"
+        bot = AsyncMock()
+        await _debounced_update(bot, -100, 42, "active", "NPU")
+        bot.edit_forum_topic.assert_called_once_with(
+            chat_id=-100,
+            message_thread_id=42,
+            name=f"{EMOJI_ACTIVE} NPU [@Jacob_localCodexBot]",
+        )
+
     async def test_emoji_prefix_does_not_trigger_name_change(self) -> None:
         bot = AsyncMock()
         await _debounced_update(bot, -100, 42, "active", "myproject")

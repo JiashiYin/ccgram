@@ -125,6 +125,12 @@ def _resolve_topic_name(key: tuple[int, int], display_name: str) -> str:
     if cached is None:
         _topic_names[key] = clean
         return clean
+    from .topic_routing import extract_default_responder
+
+    cached_base, cached_owner = extract_default_responder(cached)
+    clean_base, clean_owner = extract_default_responder(clean)
+    if clean_owner is None and cached_owner is not None and clean_base == cached_base:
+        return cached
     if cached != clean:
         _topic_names[key] = clean
         # Invalidate state so next update_topic_emoji re-applies emoji with new name

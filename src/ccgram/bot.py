@@ -738,8 +738,6 @@ async def topic_created_handler(
 ) -> None:
     """Prompt unbound topics immediately after manual Telegram topic creation."""
     user = update.effective_user
-    if not user or not is_user_allowed(user.id):
-        return
     if not update.message or not update.message.forum_topic_created:
         return
 
@@ -751,6 +749,9 @@ async def topic_created_handler(
     created = update.message.forum_topic_created
     if chat_id is not None and created and created.name:
         update_stored_topic_name(chat_id, thread_id, created.name)
+
+    if not user or not is_user_allowed(user.id):
+        return
 
     await _handle_unbound_topic(
         user.id,
@@ -769,9 +770,6 @@ async def topic_edited_handler(
     Ignores icon-only edits (name is None) and emoji-only changes from the bot
     itself (clean name unchanged after stripping prefixes).
     """
-    user = update.effective_user
-    if not user or not is_user_allowed(user.id):
-        return
     if not update.message or not update.message.forum_topic_edited:
         return
 

@@ -31,6 +31,25 @@ _PATCH_ALLOWED = patch("ccgram.bot.is_user_allowed", return_value=True)
 
 
 class TestTopicEditedHandler:
+    @patch("ccgram.bot.is_user_allowed", return_value=False)
+    @patch("ccgram.bot.tmux_manager")
+    @patch("ccgram.bot.session_manager")
+    async def test_caches_topic_edit_even_when_editor_is_not_allowed(
+        self, mock_sm: MagicMock, mock_tm: MagicMock, _allowed: MagicMock
+    ) -> None:
+        from ccgram.bot import topic_edited_handler
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        _topic_names[(-100, 42)] = "old-name"
+        mock_sm.get_window_for_chat_thread.return_value = None
+        mock_tm.rename_window = AsyncMock()
+
+        update = _make_update("new-name", user_id=999)
+        await topic_edited_handler(update, MagicMock())
+
+        assert _topic_names[(-100, 42)] == "new-name"
+        mock_tm.rename_window.assert_not_called()
+
     @_PATCH_ALLOWED
     @patch("ccgram.bot.tmux_manager")
     @patch("ccgram.bot.session_manager")
