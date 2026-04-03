@@ -16,10 +16,12 @@ from ccgram.handlers.topic_emoji import (
     EMOJI_DONE,
     EMOJI_IDLE,
     EMOJI_YOLO,
+    get_stored_topic_name,
     clear_topic_emoji_state,
     format_topic_name_for_mode,
     reset_all_state,
     strip_emoji_prefix,
+    update_stored_topic_name,
     update_topic_emoji,
 )
 
@@ -350,6 +352,45 @@ class TestTopicNamePreservation:
             message_thread_id=42,
             name=f"{EMOJI_ACTIVE} renamed",
         )
+
+    def test_update_stored_topic_name_prunes_unbound_duplicate_threads(self) -> None:
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        _topic_names[(-100, 41)] = "VPN [@Jacob_CodexBot]"
+        with patch(
+            "ccgram.handlers.topic_emoji._is_bound_topic",
+            side_effect=lambda chat_id, thread_id: thread_id == 42,
+        ):
+            update_stored_topic_name(-100, 42, "VPN [@Jacob_CodexBot]")
+
+        assert get_stored_topic_name(-100, 41) is None
+        assert get_stored_topic_name(-100, 42) == "VPN [@Jacob_CodexBot]"
+
+    def test_update_stored_topic_name_keeps_live_bound_duplicate_threads(self) -> None:
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        _topic_names[(-100, 41)] = "helloworld [@Jacob_localCodexBot]"
+        with patch(
+            "ccgram.handlers.topic_emoji._is_bound_topic",
+            return_value=True,
+        ):
+            update_stored_topic_name(-100, 42, "helloworld [@Jacob_localCodexBot]")
+
+        assert get_stored_topic_name(-100, 41) == "helloworld [@Jacob_localCodexBot]"
+        assert get_stored_topic_name(-100, 42) == "helloworld [@Jacob_localCodexBot]"
+
+    def test_update_stored_topic_name_prunes_plain_stale_duplicate_after_claim(self) -> None:
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        _topic_names[(-100, 41)] = "NPU"
+        with patch(
+            "ccgram.handlers.topic_emoji._is_bound_topic",
+            return_value=False,
+        ):
+            update_stored_topic_name(-100, 42, "NPU [@Jacob_localCodexBot]")
+
+        assert get_stored_topic_name(-100, 41) is None
+        assert get_stored_topic_name(-100, 42) == "NPU [@Jacob_localCodexBot]"
 
 
 class TestClearTopicEmojiState:

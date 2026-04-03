@@ -113,6 +113,59 @@ _topic_names.update(_load_topic_name_cache())
 _disabled_chats: set[int] = set()
 
 
+def _is_bound_topic(chat_id: int, thread_id: int) -> bool:
+    """Return True when a topic is still bound to a live session."""
+    from ..session import session_manager
+
+    return session_manager.get_window_for_chat_thread(chat_id, thread_id) is not None
+
+
+def _same_topic_identity(candidate_name: str, preferred_name: str) -> bool:
+    """Return True when two cache names refer to the same logical topic."""
+    from .topic_routing import extract_default_responder
+
+    candidate_base, candidate_owner = extract_default_responder(
+        strip_emoji_prefix(candidate_name)
+    )
+    preferred_base, preferred_owner = extract_default_responder(
+        strip_emoji_prefix(preferred_name)
+    )
+    if candidate_base != preferred_base:
+        return False
+    if candidate_owner == preferred_owner:
+        return True
+    # If the preferred name now carries an owner marker, treat older plain
+    # entries for the same base topic as stale duplicates.
+    return preferred_owner is not None and candidate_owner is None
+
+
+def _prune_duplicate_topic_names(
+    chat_id: int, preferred_thread_id: int, preferred_name: str
+) -> bool:
+    """Drop stale duplicate cache entries for the same logical topic.
+
+    Only prunes entries in the same chat that match the preferred topic name
+    and are not currently bound to a live session.
+    """
+    changed = False
+    for (cached_chat_id, cached_thread_id), cached_name in list(_topic_names.items()):
+        if cached_chat_id != chat_id or cached_thread_id == preferred_thread_id:
+            continue
+        if not _same_topic_identity(cached_name, preferred_name):
+            continue
+        if _is_bound_topic(chat_id, cached_thread_id):
+            continue
+        logger.info(
+            "Pruning stale topic-name cache entry: chat=%d thread=%d name=%s",
+            chat_id,
+            cached_thread_id,
+            cached_name,
+        )
+        _topic_names.pop((cached_chat_id, cached_thread_id), None)
+        changed = True
+    return changed
+
+
 def _resolve_topic_name(key: tuple[int, int], display_name: str) -> str:
     """Return the clean topic name, updating the cache when the name changes.
 
@@ -287,8 +340,13 @@ def update_stored_topic_name(chat_id: int, thread_id: int, new_clean_name: str) 
     since the Telegram topic already has the correct name — the next emoji
     cycle will naturally use the updated base name.
     """
-    _topic_names[(chat_id, thread_id)] = new_clean_name
-    _save_topic_name_cache()
+    clean_name = strip_emoji_prefix(new_clean_name)
+    key = (chat_id, thread_id)
+    changed = _topic_names.get(key) != clean_name
+    _topic_names[key] = clean_name
+    changed = _prune_duplicate_topic_names(chat_id, thread_id, clean_name) or changed
+    if changed:
+        _save_topic_name_cache()
 
 
 def get_stored_topic_name(chat_id: int, thread_id: int) -> str | None:
