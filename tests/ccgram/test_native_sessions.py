@@ -11,6 +11,7 @@ from ccgram.native_sessions import (
     NATIVE_WINDOW_PREFIX,
     capture_native_pane,
     list_native_windows,
+    find_orphaned_native_sessions,
     mark_native_session_exited,
     register_native_session,
     send_native_keys,
@@ -355,3 +356,67 @@ def test_list_native_windows_marks_missing_bridge_process_exited(
     record = registry["sessions"][window_id]
     assert record["running"] is False
     killpg.assert_called_once_with(999, signal.SIGKILL)
+
+
+def test_register_native_session_records_launcher_tty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}tty1"
+    snapshot_path = tmp_path / "native" / "tty1" / "snapshot.json"
+    control_path = tmp_path / "native" / "tty1" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="/dev/pts/9",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=120,
+        rows=40,
+        pid=1234,
+        process_group_id=1234,
+        launcher_tty="/dev/pts/5",
+    )
+
+    registry = json.loads((tmp_path / "native-sessions.json").read_text())
+    assert registry["sessions"][window_id]["launcher_tty"] == "/dev/pts/5"
+    assert registry["sessions"][window_id]["orphaned_at"] is None
+
+
+def test_find_orphaned_native_sessions_requires_grace_period(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+    window_id = f"{NATIVE_WINDOW_PREFIX}orphan1"
+    snapshot_path = tmp_path / "native" / "orphan1" / "snapshot.json"
+    control_path = tmp_path / "native" / "orphan1" / "control.sock"
+    register_native_session(
+        window_id=window_id,
+        window_name="proj",
+        cwd=str(tmp_path),
+        provider_name="codex",
+        pane_current_command="codex",
+        pane_tty="/dev/pts/9",
+        snapshot_path=snapshot_path,
+        control_socket_path=control_path,
+        columns=120,
+        rows=40,
+        pid=1234,
+        process_group_id=1234,
+        launcher_tty="/dev/pts/5",
+    )
+
+    with (
+        patch("ccgram.native_sessions._pid_is_running", return_value=True),
+        patch("ccgram.native_sessions._has_live_control_channel", return_value=True),
+        patch("ccgram.native_sessions._bridge_has_live_terminal", return_value=False),
+    ):
+        assert find_orphaned_native_sessions(now=100.0, grace_secs=30.0) == []
+        orphans = find_orphaned_native_sessions(now=131.0, grace_secs=30.0)
+
+    assert [orphan.window_id for orphan in orphans] == [window_id]

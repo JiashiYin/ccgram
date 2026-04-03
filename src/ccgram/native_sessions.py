@@ -55,6 +55,15 @@ class NativeWindow:
     pane_height: int = 0
 
 
+@dataclass(frozen=True)
+class NativeOrphan:
+    window_id: str
+    window_name: str
+    pid: int
+    process_group_id: int
+    reason: str
+
+
 @dataclass
 class _MirrorState:
     window_id: str
@@ -121,6 +130,37 @@ def _pid_is_running(pid: object) -> bool:
     return True
 
 
+def _ps_tty_for_pid(pid: object) -> str:
+    if not isinstance(pid, int) or pid <= 0:
+        return ""
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "tty=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip()
+
+
+def _bridge_has_live_terminal(record: dict[str, Any]) -> bool:
+    bridge_pid = record.get("bridge_pid")
+    launcher_tty = record.get("launcher_tty")
+    if not isinstance(bridge_pid, int) or bridge_pid <= 0:
+        return False
+    if not _pid_is_running(bridge_pid):
+        return False
+    if not isinstance(launcher_tty, str) or not launcher_tty:
+        return False
+    tty_name = _ps_tty_for_pid(bridge_pid)
+    return tty_name not in {"", "?", "??"} and tty_name == launcher_tty.removeprefix(
+        "/dev/"
+    )
+
+
 def _has_live_control_channel(record: dict[str, Any], *, now: float) -> bool:
     """Return whether a running native session still has a usable control socket.
 
@@ -175,6 +215,7 @@ def register_native_session(
     rows: int,
     pid: int,
     process_group_id: int | None = None,
+    launcher_tty: str = "",
 ) -> None:
     """Persist a newly launched native session."""
     data = _load_registry()
@@ -194,12 +235,52 @@ def register_native_session(
         "pid": pid,
         "process_group_id": process_group_id if process_group_id is not None else pid,
         "bridge_pid": os.getpid(),
+        "launcher_tty": launcher_tty,
+        "orphaned_at": None,
         "running": True,
         "started_at": time.time(),
         "ended_at": None,
         "exit_code": None,
     }
     _save_registry(data)
+
+
+def find_orphaned_native_sessions(
+    *, now: float | None = None, grace_secs: float = 30.0
+) -> list[NativeOrphan]:
+    ts = time.time() if now is None else now
+    data = _load_registry()
+    sessions = data.get("sessions", {})
+    orphans: list[NativeOrphan] = []
+    if not isinstance(sessions, dict):
+        return orphans
+    for window_id, record in sessions.items():
+        if not isinstance(record, dict) or not record.get("running", False):
+            continue
+        if not _pid_is_running(record.get("pid")):
+            continue
+        if not _has_live_control_channel(record, now=ts):
+            continue
+        if _bridge_has_live_terminal(record):
+            record["orphaned_at"] = None
+            continue
+        orphaned_at = record.get("orphaned_at")
+        if not isinstance(orphaned_at, (int, float)):
+            record["orphaned_at"] = ts
+            continue
+        if ts - float(orphaned_at) < grace_secs:
+            continue
+        orphans.append(
+            NativeOrphan(
+                window_id=window_id,
+                window_name=str(record.get("window_name", "")),
+                pid=int(record.get("pid") or 0),
+                process_group_id=int(record.get("process_group_id") or 0),
+                reason="launcher terminal disappeared",
+            )
+        )
+    _save_registry(data)
+    return orphans
 
 
 def update_native_snapshot(
@@ -686,6 +767,7 @@ def run_native_notify_session(
     snapshot_path = session_dir / "snapshot.json"
     control_socket_path = session_dir / "control.sock"
     columns, rows = _current_terminal_size()
+    launcher_tty = os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else ""
     window_name = _session_window_name(cwd, provider)
     command_text = _launch_command_text(launch_command, agent_args)
     child, master_fd, pane_tty = _spawn_native_child(
@@ -708,6 +790,7 @@ def run_native_notify_session(
         rows=rows,
         pid=child.pid,
         process_group_id=child.pid,
+        launcher_tty=launcher_tty,
     )
     update_native_snapshot(
         window_id,
