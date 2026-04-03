@@ -414,7 +414,7 @@ def test_find_orphaned_native_sessions_requires_grace_period(
     with (
         patch("ccgram.native_sessions._pid_is_running", return_value=True),
         patch("ccgram.native_sessions._has_live_control_channel", return_value=True),
-        patch("ccgram.native_sessions._ps_tty_for_pid", return_value="pts/99"),
+        patch("ccgram.native_sessions._ps_tty_for_pid", return_value="?"),
     ):
         assert find_orphaned_native_sessions(now=100.0, grace_secs=30.0) == []
         orphans = find_orphaned_native_sessions(now=131.0, grace_secs=30.0)
@@ -463,7 +463,7 @@ def test_find_orphaned_native_sessions_skips_without_launcher_tty_metadata(
     assert registry["sessions"][window_id]["orphaned_at"] is None
 
 
-def test_find_orphaned_native_sessions_skips_on_ps_failure(
+def test_find_orphaned_native_sessions_skips_on_empty_ps_result(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))

@@ -147,17 +147,19 @@ def _ps_tty_for_pid(pid: object) -> str:
 
 
 def _bridge_has_live_terminal(record: dict[str, Any]) -> bool | None:
-    bridge_pid = record.get("bridge_pid")
     launcher_tty = record.get("launcher_tty")
-    if not isinstance(bridge_pid, int) or bridge_pid <= 0:
-        return None
-    if not _pid_is_running(bridge_pid):
-        return None
     if not isinstance(launcher_tty, str) or not launcher_tty:
         return None
+    bridge_pid = record.get("bridge_pid")
+    if not isinstance(bridge_pid, int) or bridge_pid <= 0:
+        return False
+    if not _pid_is_running(bridge_pid):
+        return False
     tty_name = _ps_tty_for_pid(bridge_pid)
-    if tty_name in {"", "?", "??"}:
+    if tty_name == "":
         return None
+    if tty_name in {"?", "??"}:
+        return False
     return tty_name == launcher_tty.removeprefix("/dev/")
 
 
