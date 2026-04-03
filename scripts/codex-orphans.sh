@@ -5,6 +5,18 @@ self_pid="$$"
 self_uid="$(id -u)"
 self_tty="$(ps -p "$self_pid" -o tty= | tr -d '[:space:]')"
 
+ps_parent_pid() {
+  local pid="$1"
+  local ppid
+
+  if ! ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"; then
+    return 1
+  fi
+
+  [[ -n "$ppid" ]] || return 1
+  printf '%s\n' "$ppid"
+}
+
 is_descendant_of_self() {
   local pid="$1"
   local ppid
@@ -14,8 +26,11 @@ is_descendant_of_self() {
       return 0
     fi
 
-    ppid="$(ps -o ppid= -p "$pid" | tr -d '[:space:]')"
-    if [[ -z "$ppid" || "$ppid" == "$pid" ]]; then
+    if ! ppid="$(ps_parent_pid "$pid")"; then
+      return 2
+    fi
+
+    if [[ "$ppid" == "$pid" ]]; then
       break
     fi
 
@@ -31,13 +46,16 @@ is_ancestor_of_self() {
   local ppid
 
   while [[ -n "$pid" && "$pid" != "0" ]]; do
-    ppid="$(ps -o ppid= -p "$pid" | tr -d '[:space:]')"
-    if [[ -z "$ppid" || "$ppid" == "$pid" ]]; then
-      break
+    if ! ppid="$(ps_parent_pid "$pid")"; then
+      return 2
     fi
 
     if [[ "$ppid" == "$target" ]]; then
       return 0
+    fi
+
+    if [[ "$ppid" == "$pid" ]]; then
+      break
     fi
 
     pid="$ppid"
@@ -49,25 +67,77 @@ is_ancestor_of_self() {
 is_in_self_lineage() {
   local pid="$1"
 
-  is_descendant_of_self "$pid" || is_ancestor_of_self "$pid"
+  if is_descendant_of_self "$pid"; then
+    return 0
+  fi
+
+  case "$?" in
+    2) return 2 ;;
+  esac
+
+  if is_ancestor_of_self "$pid"; then
+    return 0
+  fi
+
+  return $?
 }
 
-mapfile -t rows < <(
-  ps -eo pid=,ppid=,uid=,pgid=,tty=,comm=,args= |
-    awk -v self_uid="$self_uid" '$3 == self_uid && $6 != "awk" && $6 != "bwrap" && (/ccgram notify launch --provider codex/ || /node \/usr\/bin\/codex/ || /\/codex\/codex( |$)/) { print }'
-)
+is_codex_like_command() {
+  local comm="$1"
+  local args="$2"
 
-if ((${#rows[@]} == 0)); then
-  echo "No Codex processes found."
-  exit 0
-fi
+  case "$args" in
+    *"ccgram notify launch --provider codex"*)
+      return 0
+      ;;
+  esac
 
-found_candidate=0
+  case "$comm" in
+    codex|codex-*)
+      return 0
+      ;;
+    node)
+      case "$args" in
+        *codex*)
+          return 0
+          ;;
+      esac
+      ;;
+  esac
 
-for row in "${rows[@]}"; do
-  read -r pid ppid uid pgid tty_name _comm _args <<<"$row"
+  case "$args" in
+    *" codex "*|codex|*"/codex"*|*"/codex "*)
+      return 0
+      ;;
+  esac
 
-  if [[ -z "${pid:-}" || -z "${uid:-}" || -z "${pgid:-}" || -z "${tty_name:-}" ]]; then
+  return 1
+}
+
+is_allowed_group_member() {
+  case "$1" in
+    codex|codex-*|node|bash|sh|dash|zsh|env|sudo|setsid|bwrap|ccgram)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+declare -A group_rows
+declare -A group_has_codex
+declare -A group_has_unrelated
+declare -A group_has_race
+declare -A group_has_self_lineage
+declare -A group_has_tty
+declare -A seen_groups
+declare -a group_order
+
+while IFS= read -r row; do
+  [[ -n "$row" ]] || continue
+
+  read -r pid ppid uid pgid tty_name comm args <<<"$row"
+  if [[ -z "${pid:-}" || -z "${uid:-}" || -z "${pgid:-}" || -z "${tty_name:-}" || -z "${comm:-}" ]]; then
     continue
   fi
 
@@ -75,25 +145,73 @@ for row in "${rows[@]}"; do
     continue
   fi
 
-  if [[ "$pid" == "$self_pid" ]]; then
-    continue
+  if [[ -z "${seen_groups[$pgid]+x}" ]]; then
+    seen_groups["$pgid"]=1
+    group_order+=("$pgid")
   fi
 
-  if [[ -n "$self_tty" && "$self_tty" != "?" && "$tty_name" == "$self_tty" ]]; then
-    continue
+  group_rows["$pgid"]+="$row"$'\n'
+
+  if is_codex_like_command "$comm" "$args"; then
+    group_has_codex["$pgid"]=1
   fi
 
-  if is_in_self_lineage "$pid"; then
-    continue
+  if ! is_allowed_group_member "$comm"; then
+    group_has_unrelated["$pgid"]=1
   fi
 
   if [[ "$tty_name" != "?" ]]; then
+    group_has_tty["$pgid"]=1
+  fi
+
+  if is_in_self_lineage "$pid"; then
+    group_has_self_lineage["$pgid"]=1
+  else
+    case "$?" in
+      2)
+        group_has_race["$pgid"]=1
+        ;;
+    esac
+  fi
+done < <(
+  ps -eo pid=,ppid=,uid=,pgid=,tty=,comm=,args=
+)
+
+if ((${#group_order[@]} == 0)); then
+  echo "No Codex processes found."
+  exit 0
+fi
+
+candidate_count=0
+
+for pgid in "${group_order[@]}"; do
+  if [[ -z "${group_has_codex[$pgid]+x}" ]]; then
     continue
   fi
 
-  found_candidate=1
-  echo "Orphan candidate: pid=$pid ppid=$ppid pgid=$pgid tty=$tty_name"
-  echo "  $row"
+  if [[ -n "${group_has_race[$pgid]+x}" ]]; then
+    echo "Skipping pgid=$pgid: process disappeared during scan."
+    continue
+  fi
+
+  if [[ -n "${group_has_self_lineage[$pgid]+x}" ]]; then
+    continue
+  fi
+
+  if [[ -n "${group_has_unrelated[$pgid]+x}" ]]; then
+    continue
+  fi
+
+  if [[ -n "${group_has_tty[$pgid]+x}" ]]; then
+    continue
+  fi
+
+  candidate_count=$((candidate_count + 1))
+  echo "Detached Codex candidate group: pgid=$pgid"
+  while IFS= read -r member; do
+    [[ -n "$member" ]] || continue
+    echo "  $member"
+  done <<<"${group_rows[$pgid]}"
 
   read -r -p "Kill process group $pgid? [y/N] " answer
   if [[ "$answer" =~ ^[Yy]$ ]]; then
@@ -106,6 +224,6 @@ for row in "${rows[@]}"; do
   fi
 done
 
-if [[ "$found_candidate" -eq 0 ]]; then
+if [[ "$candidate_count" -eq 0 ]]; then
   echo "No detached Codex candidates found."
 fi
