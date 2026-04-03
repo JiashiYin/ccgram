@@ -570,6 +570,26 @@ class TestNotifyInstall:
             _direct_launcher_path(tmp_path, "codex")
         )
 
+    def test_resolve_notify_launch_command_dangerous_uses_direct_command_not_full_auto(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        install = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert install.exit_code == 0
+
+        from ccgram.notify_shell import resolve_notify_launch_command
+
+        command = resolve_notify_launch_command("codex", dangerous=True)
+        assert str(_direct_launcher_path(tmp_path, "codex")) not in command
+        assert "--full-auto" not in command
+        assert "--dangerously-bypass-approvals-and-sandbox" in command
+
 
 class TestNotifyLaunch:
     def test_launch_ensures_background_service_is_running(
@@ -653,6 +673,51 @@ class TestNotifyLaunch:
             agent_args="--model gpt-5",
         )
         create_window.assert_not_called()
+
+    def test_launch_notify_mode_uses_dangerous_launch_command(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+
+        run_native = MagicMock(return_value=("native:1", "Started native session"))
+        resolved_commands: list[tuple[str, str]] = []
+
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.run_native_notify_session", run_native
+        )
+        monkeypatch.setattr(
+            "ccgram.notify_cmd.resolve_notify_launch_command",
+            lambda provider, dangerous=False: resolved_commands.append(
+                (provider, dangerous)
+            )
+            or "/usr/bin/codex --dangerously-bypass-approvals-and-sandbox",
+        )
+
+        result = runner.invoke(
+            cli,
+            [
+                "notify",
+                "launch",
+                "--provider",
+                "codex",
+                "--cwd",
+                str(tmp_path),
+                "--",
+                "resume",
+                "abc",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert resolved_commands == [("codex", True)]
+        run_native.assert_called_once_with(
+            provider="codex",
+            cwd=str(tmp_path.resolve()),
+            launch_command="/usr/bin/codex --dangerously-bypass-approvals-and-sandbox",
+            agent_args="resume abc",
+        )
 
     def test_launch_interactive_mode_creates_tmux_window(
         self, tmp_path: Path, monkeypatch

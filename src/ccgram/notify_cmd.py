@@ -31,6 +31,11 @@ from .utils import tmux_session_name
 
 _NOTIFY_MODES = ("notify", "interactive")
 _SHELLS = ("bash", "zsh", "fish")
+_DANGEROUS_ARGS = {
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-skip-permissions",
+    "--yolo",
+}
 
 
 class _LazyTmuxManagerProxy:
@@ -53,6 +58,14 @@ class _LazySessionManagerProxy:
 
 tmux_manager = _LazyTmuxManagerProxy()
 session_manager = _LazySessionManagerProxy()
+
+
+def _extract_dangerous_mode(agent_args: tuple[str, ...]) -> tuple[bool, tuple[str, ...]]:
+    """Return (dangerous_requested, filtered_args) for a notify launch."""
+    filtered = tuple(arg for arg in agent_args if arg not in _DANGEROUS_ARGS)
+    if len(filtered) != len(agent_args):
+        return True, filtered
+    return False, agent_args
 
 
 def _print_notify_status(provider: str) -> None:
@@ -97,9 +110,10 @@ async def _launch_tmux_session(
     cwd: str,
     mode: str,
     attach: bool,
+    dangerous: bool,
     agent_args: str,
 ) -> tuple[str, str]:
-    launch_command = resolve_notify_launch_command(provider)
+    launch_command = resolve_notify_launch_command(provider, dangerous=dangerous)
     success, message, _window_name, window_id = await tmux_manager.create_window(
         work_dir=cwd,
         launch_command=launch_command,
@@ -230,7 +244,8 @@ def notify_launch_cmd(
 ) -> None:
     """Launch a provider session in notify or interactive mode."""
     resolved_cwd = str(cwd.resolve())
-    agent_text = shlex.join(list(agent_args))
+    dangerous, filtered_agent_args = _extract_dangerous_mode(agent_args)
+    agent_text = shlex.join(list(filtered_agent_args))
 
     ensure_notify_service_running()
 
@@ -242,7 +257,7 @@ def notify_launch_cmd(
         run_native_notify_session(
             provider=provider,
             cwd=resolved_cwd,
-            launch_command=resolve_notify_launch_command(provider),
+            launch_command=resolve_notify_launch_command(provider, dangerous=dangerous),
             agent_args=agent_text,
         )
         return
@@ -253,6 +268,7 @@ def notify_launch_cmd(
             cwd=resolved_cwd,
             mode=mode,
             attach=attach,
+            dangerous=dangerous,
             agent_args=agent_text,
         )
     )

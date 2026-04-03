@@ -23,6 +23,11 @@ _RC_BLOCK_END = "# <<< ccgram notify <<<"
 _MODE_NOTIFY = "notify"
 _ENV_KEY_TEMPLATE = "CCGRAM_{provider}_COMMAND"
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_DANGEROUS_FLAGS: dict[str, str] = {
+    "claude": "--dangerously-skip-permissions",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
+    "gemini": "--yolo",
+}
 
 
 @dataclass
@@ -255,6 +260,40 @@ def _write_direct_launcher(path: Path, command: str) -> None:
     path.chmod(0o755)
 
 
+def _apply_dangerous_overrides(command: str, provider: str, *, dangerous: bool) -> str:
+    """Adjust a preserved direct command for a dangerous launch request."""
+    if not dangerous:
+        return command
+
+    dangerous_flag = _DANGEROUS_FLAGS.get(provider.lower())
+    if not dangerous_flag:
+        return command
+
+    tokens = shlex.split(command)
+    filtered: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--full-auto":
+            i += 1
+            continue
+        if token in ("-a", "--ask-for-approval", "-s", "--sandbox"):
+            i += 2
+            continue
+        if token.startswith("--ask-for-approval=") or token.startswith("--sandbox="):
+            i += 1
+            continue
+        if token in _DANGEROUS_FLAGS.values():
+            i += 1
+            continue
+        filtered.append(token)
+        i += 1
+
+    if dangerous_flag not in filtered:
+        filtered.append(dangerous_flag)
+    return " ".join(shlex.quote(token) for token in filtered)
+
+
 def _shell_wrapper(provider: str, shell: str) -> str:
     if shell == "fish":
         return (
@@ -472,12 +511,15 @@ def any_notify_providers_enabled() -> bool:
     return any(status.enabled for status in iter_notify_statuses())
 
 
-def resolve_notify_launch_command(provider: str) -> str:
+def resolve_notify_launch_command(
+    provider: str, *, dangerous: bool = False
+) -> str:
     """Resolve the command used for notify-managed provider launches."""
     status = get_notify_status(provider)
-    if status.installed and status.direct_launcher_exists:
+    if not dangerous and status.installed and status.direct_launcher_exists:
         return status.env_value or status.direct_launcher_path
-    return resolve_launch_command(provider)
+    base_command = status.direct_command or resolve_launch_command(provider)
+    return _apply_dangerous_overrides(base_command, provider, dangerous=dangerous)
 
 
 def status_to_dict(status: NotifyStatus) -> dict[str, object]:
