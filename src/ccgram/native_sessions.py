@@ -146,19 +146,19 @@ def _ps_tty_for_pid(pid: object) -> str:
     return result.stdout.strip()
 
 
-def _bridge_has_live_terminal(record: dict[str, Any]) -> bool:
+def _bridge_has_live_terminal(record: dict[str, Any]) -> bool | None:
     bridge_pid = record.get("bridge_pid")
     launcher_tty = record.get("launcher_tty")
     if not isinstance(bridge_pid, int) or bridge_pid <= 0:
-        return False
+        return None
     if not _pid_is_running(bridge_pid):
-        return False
+        return None
     if not isinstance(launcher_tty, str) or not launcher_tty:
-        return False
+        return None
     tty_name = _ps_tty_for_pid(bridge_pid)
-    return tty_name not in {"", "?", "??"} and tty_name == launcher_tty.removeprefix(
-        "/dev/"
-    )
+    if tty_name in {"", "?", "??"}:
+        return None
+    return tty_name == launcher_tty.removeprefix("/dev/")
 
 
 def _has_live_control_channel(record: dict[str, Any], *, now: float) -> bool:
@@ -261,12 +261,14 @@ def find_orphaned_native_sessions(
             continue
         if not _has_live_control_channel(record, now=ts):
             continue
-        if _bridge_has_live_terminal(record):
+        bridge_terminal = _bridge_has_live_terminal(record)
+        if bridge_terminal is True:
             record["orphaned_at"] = None
             continue
         orphaned_at = record.get("orphaned_at")
         if not isinstance(orphaned_at, (int, float)):
-            record["orphaned_at"] = ts
+            if bridge_terminal is False:
+                record["orphaned_at"] = ts
             continue
         if ts - float(orphaned_at) < grace_secs:
             continue
