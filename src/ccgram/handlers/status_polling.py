@@ -93,8 +93,10 @@ TOPIC_CHECK_INTERVAL = 60.0  # seconds
 SHELL_COMMANDS = frozenset({"bash", "zsh", "fish", "sh", "dash", "tcsh", "csh", "ksh"})
 
 # Consecutive topic probe failure threshold. After _MAX_PROBE_FAILURES
-# consecutive timeouts, probing is suspended to stop log spam and useless API calls.
+# consecutive timeouts, probing backs off instead of being suspended forever.
 _MAX_PROBE_FAILURES = 3
+_MAX_PROBE_BACKOFF_SECONDS = 300.0
+_STALE_BOUND_SHELL_TTL_SECS = 24 * 60 * 60
 
 # Typing indicator throttle interval.
 # Telegram typing action expires after ~5s; we re-send every 4s.
@@ -134,6 +136,7 @@ class WindowPollState:
     rc_off_since: float | None = None  # debounce RC removal (3s)
     last_rc_detected: bool = False  # raw detection result (before debounce)
     missing_polls: int = 0
+    probe_backoff_until: float | None = None
 
 
 @dataclass
@@ -326,12 +329,14 @@ def clear_probe_failures(window_id: str) -> None:
     ws = _window_poll_state.get(window_id)
     if ws:
         ws.probe_failures = 0
+        ws.probe_backoff_until = None
 
 
 def reset_probe_failures_state() -> None:
     """Reset all probe failure tracking (for testing)."""
     for ws in _window_poll_state.values():
         ws.probe_failures = 0
+        ws.probe_backoff_until = None
 
 
 def clear_typing_state(user_id: int, thread_id: int) -> None:
@@ -1188,13 +1193,20 @@ async def _handle_dead_window_notification(
 
 
 def _record_probe_failure(window_id: str) -> int:
-    """Increment probe failure counter; log once when threshold is reached."""
+    """Increment probe failure counter and apply bounded backoff."""
     ws = _get_window_state(window_id)
     ws.probe_failures += 1
     count = ws.probe_failures
+    if count >= _MAX_PROBE_FAILURES:
+        backoff_multiplier = 2 ** (count - _MAX_PROBE_FAILURES)
+        backoff = min(
+            _MAX_PROBE_BACKOFF_SECONDS,
+            TOPIC_CHECK_INTERVAL * backoff_multiplier,
+        )
+        ws.probe_backoff_until = time.monotonic() + backoff
     if count == _MAX_PROBE_FAILURES:
         logger.info(
-            "Suspending topic probe for %s after %d consecutive failures",
+            "Backing off topic probe for %s after %d consecutive failures",
             window_id,
             count,
         )
@@ -1267,23 +1279,78 @@ async def _cleanup_duplicate_notify_bindings(bot: Bot) -> None:
         )
 
 
+async def _cleanup_stale_bound_shell_windows(
+    bot: Bot,
+    live_windows: list,
+) -> None:
+    """Auto-remove stale shell bindings so old helper topics do not live forever.
+
+    Two cases are safe to clean automatically:
+    - notify sessions that have fallen back to a plain shell with no live agent
+    - shell provider windows that have been idle for a long persisted TTL
+    """
+    live_by_id = {w.window_id: w for w in live_windows}
+    now_wall = time.time()
+    for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
+        window = live_by_id.get(wid)
+        if window is None:
+            continue
+        state = session_manager.get_window_state(wid)
+        if state.provider_name != "shell":
+            continue
+        if state.session_id or state.transcript_path:
+            continue
+
+        notification_mode = session_manager.get_notification_mode(wid)
+        is_notify_shell_fallback = notification_mode == "notify" and is_shell_prompt(
+            window.pane_current_command
+        )
+        last_activity = session_manager.get_window_last_activity(wid)
+        stale_shell = (
+            last_activity is not None
+            and now_wall - last_activity >= _STALE_BOUND_SHELL_TTL_SECS
+        )
+        if not is_notify_shell_fallback and not stale_shell:
+            continue
+
+        chat_id = session_manager.resolve_chat_id(user_id, thread_id)
+        if chat_id != user_id:
+            await remove_topic(bot, chat_id, thread_id)
+        await clear_topic_state(user_id, thread_id, bot=bot, window_id=wid)
+        session_manager.unbind_thread(user_id, thread_id)
+        await tmux_manager.kill_window(wid)
+        purge_dead_window_state(wid)
+        logger.info(
+            "Cleaned stale shell binding: user=%d thread=%d window=%s notify_fallback=%s stale_shell=%s",
+            user_id,
+            thread_id,
+            wid,
+            is_notify_shell_fallback,
+            stale_shell,
+        )
+
+
 async def _probe_topic_existence(bot: Bot) -> None:
     """Probe all bound topics via Telegram API; detect deleted topics."""
+    now = time.monotonic()
     for user_id, thread_id, wid in list(session_manager.iter_thread_bindings()):
-        if _get_window_state(wid).probe_failures >= _MAX_PROBE_FAILURES:
+        ws = _get_window_state(wid)
+        if ws.probe_backoff_until is not None and now < ws.probe_backoff_until:
             continue
         try:
             await bot.unpin_all_forum_topic_messages(
                 chat_id=session_manager.resolve_chat_id(user_id, thread_id),
                 message_thread_id=thread_id,
             )
-            _get_window_state(wid).probe_failures = 0
+            ws.probe_failures = 0
+            ws.probe_backoff_until = None
         except TelegramError as e:
             if isinstance(e, BadRequest) and (
                 "Topic_id_invalid" in e.message
                 or "thread not found" in e.message.lower()
             ):
-                _get_window_state(wid).probe_failures = 0
+                ws.probe_failures = 0
+                ws.probe_backoff_until = None
                 if session_manager.get_notification_mode(wid) == "notify":
                     new_thread_id = await recreate_notify_topic_binding(
                         bot, user_id, wid, thread_id
@@ -1547,6 +1614,7 @@ async def status_poll_loop(bot: Bot) -> None:
                 await _prune_stale_state(all_windows)
                 await _cleanup_ghost_bindings(bot, all_windows)
                 await _cleanup_duplicate_notify_bindings(bot)
+                await _cleanup_stale_bound_shell_windows(bot, all_windows)
                 await _probe_topic_existence(bot)
                 # Sweep stale log-throttle entries to prevent unbounded growth
                 log_throttle_sweep()

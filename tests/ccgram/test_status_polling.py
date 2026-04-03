@@ -15,6 +15,7 @@ from ccgram.handlers.status_polling import (
     PendingNotifyReport,
     _check_autoclose_timers,
     _cleanup_ghost_bindings,
+    _cleanup_stale_bound_shell_windows,
     _check_transcript_activity,
     _clear_autoclose_if_active,
     _dead_notified,
@@ -1019,9 +1020,96 @@ class TestDuplicateNotifyBindingCleanup:
         mock_sm.unbind_thread.assert_called_once_with(1, 42)
 
 
+class TestStaleShellBindingCleanup:
+    async def test_cleans_notify_shell_fallback_window(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        live_window = MagicMock()
+        live_window.window_id = "@11"
+        live_window.pane_current_command = "bash"
+
+        shell_state = MagicMock()
+        shell_state.provider_name = "shell"
+        shell_state.session_id = ""
+        shell_state.transcript_path = ""
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.remove_topic",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_remove_topic,
+            patch(
+                "ccgram.handlers.status_polling.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as mock_clear_topic,
+            patch(
+                "ccgram.handlers.status_polling.tmux_manager.kill_window",
+                new_callable=AsyncMock,
+            ) as mock_kill_window,
+            patch("ccgram.handlers.status_polling.purge_dead_window_state") as mock_purge,
+        ):
+            mock_sm.iter_thread_bindings.return_value = [(1, 191, "@11")]
+            mock_sm.get_window_state.return_value = shell_state
+            mock_sm.get_notification_mode.return_value = "notify"
+            mock_sm.get_window_last_activity.return_value = None
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _cleanup_stale_bound_shell_windows(bot, [live_window])
+
+        mock_remove_topic.assert_awaited_once_with(bot, -100, 191)
+        mock_clear_topic.assert_awaited_once_with(1, 191, bot=bot, window_id="@11")
+        mock_sm.unbind_thread.assert_called_once_with(1, 191)
+        mock_kill_window.assert_awaited_once_with("@11")
+        mock_purge.assert_called_once_with("@11")
+
+    async def test_cleans_shell_binding_after_long_idle(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        live_window = MagicMock()
+        live_window.window_id = "@6"
+        live_window.pane_current_command = "bash"
+
+        shell_state = MagicMock()
+        shell_state.provider_name = "shell"
+        shell_state.session_id = ""
+        shell_state.transcript_path = ""
+
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.remove_topic",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "ccgram.handlers.status_polling.clear_topic_state",
+                new_callable=AsyncMock,
+            ) as mock_clear_topic,
+            patch(
+                "ccgram.handlers.status_polling.tmux_manager.kill_window",
+                new_callable=AsyncMock,
+            ) as mock_kill_window,
+            patch("ccgram.handlers.status_polling.purge_dead_window_state"),
+            patch("ccgram.handlers.status_polling.time") as mock_time,
+        ):
+            mock_time.time.return_value = 200000.0
+            mock_sm.iter_thread_bindings.return_value = [(1, 173, "@6")]
+            mock_sm.get_window_state.return_value = shell_state
+            mock_sm.get_notification_mode.return_value = "interactive"
+            mock_sm.get_window_last_activity.return_value = 1000.0
+            mock_sm.resolve_chat_id.return_value = -100
+
+            await _cleanup_stale_bound_shell_windows(bot, [live_window])
+
+        mock_clear_topic.assert_awaited_once_with(1, 173, bot=bot, window_id="@6")
+        mock_sm.unbind_thread.assert_called_once_with(1, 173)
+        mock_kill_window.assert_awaited_once_with("@6")
+
+
 class TestProbeFailures:
-    async def test_probe_skips_suspended_windows(self) -> None:
+    async def test_probe_skips_windows_during_backoff(self) -> None:
         _get_window_state("@5").probe_failures = _MAX_PROBE_FAILURES
+        _get_window_state("@5").probe_backoff_until = time.monotonic() + 60.0
         bot = AsyncMock(spec=Bot)
         with patch("ccgram.handlers.status_polling.session_manager") as mock_sm:
             mock_sm.iter_thread_bindings.return_value = [(1, 42, "@5")]
@@ -1059,7 +1147,7 @@ class TestProbeFailures:
             await _probe_topic_existence(bot)
         assert _window_poll_state["@5"].probe_failures == 1
 
-    async def test_probe_suspends_after_max_failures(self) -> None:
+    async def test_probe_backs_off_after_max_failures(self) -> None:
         bot = AsyncMock(spec=Bot)
         bot.unpin_all_forum_topic_messages.side_effect = TelegramError("Timed out")
         with patch("ccgram.handlers.status_polling.session_manager") as mock_sm:
@@ -1069,6 +1157,25 @@ class TestProbeFailures:
                 await _probe_topic_existence(bot)
         assert bot.unpin_all_forum_topic_messages.call_count == _MAX_PROBE_FAILURES
         assert _window_poll_state["@5"].probe_failures == _MAX_PROBE_FAILURES
+        assert _window_poll_state["@5"].probe_backoff_until is not None
+
+    async def test_probe_retries_after_backoff_window_expires(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch("ccgram.handlers.status_polling.time") as mock_time,
+        ):
+            mock_sm.iter_thread_bindings.return_value = [(1, 42, "@5")]
+            mock_sm.resolve_chat_id.return_value = -100
+            mock_time.monotonic.return_value = 100.0
+            _get_window_state("@5").probe_failures = _MAX_PROBE_FAILURES
+            _get_window_state("@5").probe_backoff_until = 100.0
+
+            await _probe_topic_existence(bot)
+
+        bot.unpin_all_forum_topic_messages.assert_called_once_with(
+            chat_id=-100, message_thread_id=42
+        )
 
     @pytest.mark.parametrize(
         "window_alive",

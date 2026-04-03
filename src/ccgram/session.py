@@ -25,6 +25,7 @@ import asyncio
 import fcntl
 import json
 import structlog
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Iterator
@@ -132,6 +133,8 @@ class WindowState:
         notification_mode: "interactive" | "notify" | "errors_only" | "muted"
         approval_mode: "normal" | "yolo"
         external: True for windows owned by external tools (emdash) — never killed by ccgram
+        last_activity_at: Wall-clock timestamp of the last user-visible activity
+            associated with the window. Used to reap stale shell bindings.
     """
 
     session_id: str = ""
@@ -143,6 +146,7 @@ class WindowState:
     approval_mode: str = DEFAULT_APPROVAL_MODE
     batch_mode: str = DEFAULT_BATCH_MODE
     external: bool = False
+    last_activity_at: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -164,6 +168,8 @@ class WindowState:
             d["batch_mode"] = self.batch_mode
         if self.external:
             d["external"] = True
+        if self.last_activity_at is not None:
+            d["last_activity_at"] = self.last_activity_at
         return d
 
     @classmethod
@@ -180,6 +186,7 @@ class WindowState:
             approval_mode=data.get("approval_mode", DEFAULT_APPROVAL_MODE),
             batch_mode=data.get("batch_mode", DEFAULT_BATCH_MODE),
             external=data.get("external", False),
+            last_activity_at=data.get("last_activity_at"),
         )
 
 
@@ -1535,6 +1542,7 @@ class SessionManager:
         self._window_to_thread[(user_id, window_id)] = thread_id
         if window_name:
             self.window_display_names[window_id] = window_name
+        self.touch_window_activity(window_id, save=False)
         self._save_state()
         display = window_name or self.get_display_name(window_id)
         logger.info(
@@ -1587,6 +1595,29 @@ class SessionManager:
     def get_thread_for_window(self, user_id: int, window_id: str) -> int | None:
         """Reverse lookup: get thread_id for a window (O(1) via reverse index)."""
         return self._window_to_thread.get((user_id, window_id))
+
+    def get_window_last_activity(self, window_id: str) -> float | None:
+        """Return the persisted wall-clock last-activity timestamp for a window."""
+        state = self.window_states.get(window_id)
+        value = state.last_activity_at if state else None
+        return float(value) if isinstance(value, (int, float)) else None
+
+    def touch_window_activity(
+        self,
+        window_id: str,
+        *,
+        when: float | None = None,
+        save: bool = True,
+    ) -> None:
+        """Persist that a window had meaningful activity now.
+
+        This is used to reap stale shell-bound topics without relying on
+        transient in-memory poll state.
+        """
+        state = self.get_window_state(window_id)
+        state.last_activity_at = time.time() if when is None else when
+        if save:
+            self._save_state()
 
     def get_all_thread_windows(self, user_id: int) -> dict[int, str]:
         """Get all thread bindings for a user."""
@@ -1754,6 +1785,7 @@ class SessionManager:
             return False, "Window not found (may have been closed)"
         success = await tmux_manager.send_keys(window.window_id, text, raw=raw)
         if success:
+            self.touch_window_activity(window_id)
             return True, f"Sent to {display}"
         return False, "Failed to send keys"
 

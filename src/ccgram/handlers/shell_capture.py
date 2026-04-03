@@ -478,6 +478,7 @@ async def _relay_passive_output(
 
     if passive.text != state.last_output:
         state.last_output = passive.text
+        session_manager.touch_window_activity(window_id)
         cmd = _command_from_echo(passive.command_echo)
         combined = f"❯ {cmd}\n{passive.text}" if cmd else passive.text
         state.msg_id = await _relay_output(

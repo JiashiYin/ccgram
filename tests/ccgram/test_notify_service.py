@@ -28,6 +28,8 @@ class TestNotifyService:
             lambda: ["/usr/bin/ccgram", "run"],
         )
         monkeypatch.setattr("ccgram.notify_service.subprocess.Popen", popen)
+        reaper = MagicMock()
+        monkeypatch.setattr("ccgram.notify_service._spawn_child_reaper", reaper)
 
         status = ensure_notify_service_running()
 
@@ -37,6 +39,7 @@ class TestNotifyService:
         assert status.pid == 4321
         assert Path(status.log_path).exists()
         popen.assert_called_once()
+        reaper.assert_called_once_with(process)
         stored = json.loads(_service_state_path(tmp_path).read_text())
         assert stored["enabled"] is True
         assert stored["pid"] == 4321

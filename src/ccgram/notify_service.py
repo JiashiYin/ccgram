@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,21 @@ def _resolve_ccgram_command() -> list[str]:
         return [sys.executable, "-m", "ccgram", "run"]
 
     raise RuntimeError("Unable to resolve the ccgram executable for background start")
+
+
+def _spawn_child_reaper(process: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
+    """Reap a detached child process if it exits before the parent does.
+
+    The notify launcher process can outlive the background service startup call
+    for hours. Without a waiter, a restarted/stopped child can stick around as a
+    defunct zombie under that launcher until the foreground Codex session exits.
+    """
+
+    def _waiter() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            process.wait()
+
+    threading.Thread(target=_waiter, daemon=True).start()
 
 
 def get_notify_service_status() -> NotifyServiceStatus:
@@ -172,6 +188,7 @@ def ensure_notify_service_running() -> NotifyServiceStatus:
             start_new_session=True,
             close_fds=True,
         )
+    _spawn_child_reaper(process)
 
     if process.poll() is not None:
         raise RuntimeError("Failed to start the ccgram background service")
