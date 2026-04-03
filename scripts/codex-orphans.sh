@@ -48,13 +48,11 @@ is_codex_path_token() {
       ;;
   esac
 
-  if [[ "$basename" != *.* ]]; then
-    case "$basename" in
-      codex-*|*-codex|*-codex-*|*_codex_*|codex_*|*_codex)
-        return 0
-        ;;
-    esac
-  fi
+  case "$stem" in
+    *-codex-*|*-codex|*_codex_*|*_codex)
+      return 0
+      ;;
+  esac
 
   return 1
 }
@@ -88,8 +86,7 @@ is_codex_like_command() {
   local comm="${1:-}"
   local args="${2:-}"
   local -a tokens=()
-  local pending_python_module=0
-  local token basename
+  local token basename state=0
 
   if [[ -z "$args" ]]; then
     args="$comm"
@@ -109,31 +106,29 @@ is_codex_like_command() {
     basename="${token##*/}"
     basename="${basename#-}"
 
-    case "$basename" in
-      sudo|env|node|bun|npx|bunx|uv)
+    case "$state:$basename" in
+      0:sudo|0:env|0:node|0:bun|0:npx|0:bunx|0:uv)
         continue
         ;;
-      python|python3)
-        pending_python_module=1
+      0:python|0:python3)
+        state=1
+        continue
+        ;;
+      1:m)
+        state=2
         continue
         ;;
     esac
 
-    if (( pending_python_module == 1 )) && [[ "$basename" == "-m" ]]; then
-      pending_python_module=2
-      continue
-    fi
-
-    if (( pending_python_module == 2 )); then
-      if is_codex_path_token "$token"; then
-        return 0
-      fi
-      pending_python_module=0
-    fi
-
     if is_codex_path_token "$token"; then
       return 0
     fi
+
+    if (( state == 1 || state == 2 )); then
+      return 1
+    fi
+
+    return 1
   done
 
   return 1
@@ -244,12 +239,12 @@ while IFS= read -r row; do
     continue
   fi
 
+  pid_ppid["$pid"]="$ppid"
+  pid_tty["$pid"]="$tty_name"
+
   if [[ "$uid" != "$self_uid" ]]; then
     continue
   fi
-
-  pid_ppid["$pid"]="$ppid"
-  pid_tty["$pid"]="$tty_name"
   if [[ -z "${seen_groups[$pgid]+x}" ]]; then
     seen_groups["$pgid"]=1
     group_order+=("$pgid")
@@ -286,29 +281,31 @@ for pgid in "${group_order[@]}"; do
       continue
     fi
 
-    pid_is_in_self_lineage "$member_pid"
-    case "$?" in
-      0)
-        group_has_self_lineage["$pgid"]=1
-        break
-        ;;
-      2)
-        group_has_race["$pgid"]=1
-        break
-        ;;
-    esac
+    if pid_is_in_self_lineage "$member_pid"; then
+      group_has_self_lineage["$pgid"]=1
+      break
+    else
+      status=$?
+      case "$status" in
+        2)
+          group_has_race["$pgid"]=1
+          break
+          ;;
+      esac
+    fi
 
-    pid_has_live_ancestor "$member_pid"
-    case "$?" in
-      0)
-        group_has_attached_ancestor["$pgid"]=1
-        break
-        ;;
-      2)
-        group_has_race["$pgid"]=1
-        break
-        ;;
-    esac
+    if pid_has_live_ancestor "$member_pid"; then
+      group_has_attached_ancestor["$pgid"]=1
+      break
+    else
+      status=$?
+      case "$status" in
+        2)
+          group_has_race["$pgid"]=1
+          break
+          ;;
+      esac
+    fi
   done <<<"${group_rows[$pgid]}"
 done
 
@@ -352,7 +349,9 @@ for pgid in "${group_order[@]}"; do
     echo "  $member"
   done <<<"${group_rows[$pgid]}"
 
-  read -r -p "Kill process group $pgid? [y/N] " answer
+  if ! read -r -p "Kill process group $pgid? [y/N] " answer; then
+    answer=""
+  fi
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     kill -TERM -- "-$pgid" || true
     sleep 2
