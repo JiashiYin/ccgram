@@ -257,6 +257,17 @@ ccgram notify status
 
 This now shows both the shell wrapper state and the local background bridge state.
 
+The background `ccgram` service also patrols native `notify`-mode Codex
+sessions. If the original terminal disappears and the session stays live past a
+short grace period, CCGram kills the orphaned session and cleans up its bound
+topic state automatically.
+
+For manual inspection of detached same-user Codex process groups, run:
+
+```bash
+bash scripts/codex-orphans.sh
+```
+
 Temporarily stop intercepting plain `codex` without removing the rest of the setup:
 
 ```bash
