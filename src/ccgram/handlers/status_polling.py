@@ -49,6 +49,7 @@ from ..providers import (
     should_probe_pane_title_for_provider_detection,
 )
 from ..providers.base import StatusUpdate
+from ..native_sessions import find_orphaned_native_sessions, kill_native_session
 from ..session import session_manager
 from ..window_resolver import is_foreign_window
 from ..session_monitor import get_active_monitor
@@ -102,6 +103,7 @@ SHELL_COMMANDS = frozenset({"bash", "zsh", "fish", "sh", "dash", "tcsh", "csh", 
 _MAX_PROBE_FAILURES = 3
 _MAX_PROBE_BACKOFF_SECONDS = 300.0
 _STALE_BOUND_SHELL_TTL_SECS = 24 * 60 * 60
+_NATIVE_ORPHAN_SWEEP_INTERVAL = 5.0
 
 # Typing indicator throttle interval.
 # Telegram typing action expires after ~5s; we re-send every 4s.
@@ -558,6 +560,19 @@ async def _cleanup_dead_notify_window(bot: Bot, window_id: str) -> None:
         await clear_topic_state(user_id, thread_id, bot=bot, window_id=window_id)
         session_manager.unbind_thread(user_id, thread_id)
     purge_dead_window_state(window_id)
+
+
+async def _cleanup_orphaned_native_sessions(bot: Bot) -> None:
+    """Sweep confirmed orphaned native sessions and clean up their bindings."""
+    for orphan in find_orphaned_native_sessions():
+        if not kill_native_session(orphan.window_id):
+            continue
+        await _cleanup_dead_notify_window(bot, orphan.window_id)
+        logger.warning(
+            "Killed orphaned native notify session %s: %s",
+            orphan.window_id,
+            orphan.reason,
+        )
 
 
 async def _handle_missing_window(
@@ -1638,6 +1653,7 @@ async def status_poll_loop(bot: Bot) -> None:
     """Background task to poll terminal status for all thread-bound windows."""
     logger.info("Status polling started (interval: %ss)", STATUS_POLL_INTERVAL)
     last_topic_check = 0.0
+    last_native_orphan_sweep = 0.0
     _error_streak = 0
     while True:
         try:
@@ -1650,6 +1666,9 @@ async def status_poll_loop(bot: Bot) -> None:
 
             # Periodic topic existence probe + stale state cleanup
             now = time.monotonic()
+            if now - last_native_orphan_sweep >= _NATIVE_ORPHAN_SWEEP_INTERVAL:
+                last_native_orphan_sweep = now
+                await _cleanup_orphaned_native_sessions(bot)
             if now - last_topic_check >= TOPIC_CHECK_INTERVAL:
                 last_topic_check = now
                 await _prune_stale_state(all_windows)

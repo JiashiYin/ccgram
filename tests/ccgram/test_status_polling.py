@@ -2,6 +2,7 @@
 activity heuristic, and startup timeout."""
 
 import time
+from types import SimpleNamespace
 
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -15,6 +16,7 @@ from ccgram.handlers.status_polling import (
     PendingNotifyReport,
     _check_autoclose_timers,
     _cleanup_ghost_bindings,
+    _cleanup_orphaned_native_sessions,
     _cleanup_stale_bound_shell_windows,
     _check_transcript_activity,
     _clear_autoclose_if_active,
@@ -175,6 +177,50 @@ class TestAutocloseTimers:
             mock_sm.resolve_chat_id.return_value = -100
             await _check_autoclose_timers(bot)
         assert not _has_autoclose(1, 42)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_orphaned_native_sessions_kills_confirmed_orphans(
+        self,
+    ) -> None:
+        bot = AsyncMock(spec=Bot)
+        orphan = SimpleNamespace(
+            window_id="native:abc",
+            reason="launcher terminal disappeared",
+        )
+
+        with (
+            patch(
+                "ccgram.handlers.status_polling.find_orphaned_native_sessions",
+                return_value=[orphan],
+            ),
+            patch(
+                "ccgram.handlers.status_polling.kill_native_session",
+                return_value=True,
+            ) as mock_kill,
+            patch(
+                "ccgram.handlers.status_polling._cleanup_dead_notify_window",
+                new=AsyncMock(),
+            ) as mock_cleanup,
+        ):
+            await _cleanup_orphaned_native_sessions(bot)
+
+        mock_kill.assert_called_once_with("native:abc")
+        mock_cleanup.assert_awaited_once_with(bot, "native:abc")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_orphaned_native_sessions_skips_empty_sweep(self) -> None:
+        bot = AsyncMock(spec=Bot)
+
+        with (
+            patch(
+                "ccgram.handlers.status_polling.find_orphaned_native_sessions",
+                return_value=[],
+            ),
+            patch("ccgram.handlers.status_polling.kill_native_session") as mock_kill,
+        ):
+            await _cleanup_orphaned_native_sessions(bot)
+
+        mock_kill.assert_not_called()
 
 
 class TestTranscriptActivityHeuristic:
