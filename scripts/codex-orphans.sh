@@ -106,7 +106,27 @@ load_configured_codex_basenames() {
 
   [[ -n "$raw_value" ]] || return 0
 
-  read -r -a command_tokens <<<"$raw_value"
+  case "$raw_value" in
+    \"*\")
+      raw_value="${raw_value:1:${#raw_value}-2}"
+      ;;
+    \'*\')
+      raw_value="${raw_value:1:${#raw_value}-2}"
+      ;;
+  esac
+  raw_value="${raw_value//\\\"/\"}"
+
+  if ! mapfile -t command_tokens < <(
+    python3 - "$raw_value" <<'PY'
+import shlex
+import sys
+
+for token in shlex.split(sys.argv[1]):
+    print(token)
+PY
+  ); then
+    return 0
+  fi
   for ((i = 0; i < ${#command_tokens[@]}; i++)); do
     token="${command_tokens[i]}"
     lower="${token,,}"
