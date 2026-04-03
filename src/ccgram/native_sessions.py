@@ -279,38 +279,56 @@ def find_orphaned_native_sessions(
         if not isinstance(sessions, dict):
             return orphans
         for window_id, record in sessions.items():
-            if not isinstance(record, dict) or not record.get("running", False):
-                continue
-            if not _pid_is_running(record.get("pid")):
-                continue
-            if not _has_live_control_channel(record, now=ts):
-                continue
-            bridge_terminal = _bridge_has_live_terminal(record)
-            if bridge_terminal is True:
-                if record.get("orphaned_at") is not None:
-                    record["orphaned_at"] = None
-                    dirty = True
-                continue
-            orphaned_at = record.get("orphaned_at")
-            if not isinstance(orphaned_at, (int, float)):
-                if bridge_terminal is False:
-                    record["orphaned_at"] = ts
-                    dirty = True
-                continue
-            if ts - float(orphaned_at) < grace_secs:
-                continue
-            orphans.append(
-                NativeOrphan(
-                    window_id=window_id,
-                    window_name=str(record.get("window_name", "")),
-                    pid=int(record.get("pid") or 0),
-                    process_group_id=int(record.get("process_group_id") or 0),
-                    reason="launcher terminal disappeared",
-                )
+            orphan, record_dirty = _classify_native_orphan(
+                window_id,
+                record,
+                now=ts,
+                grace_secs=grace_secs,
             )
+            dirty = dirty or record_dirty
+            if orphan is not None:
+                orphans.append(orphan)
         if dirty:
             _save_registry(data)
     return orphans
+
+
+def _classify_native_orphan(
+    window_id: str,
+    record: Any,
+    *,
+    now: float,
+    grace_secs: float,
+) -> tuple[NativeOrphan | None, bool]:
+    dirty = False
+    orphan: NativeOrphan | None = None
+    if not isinstance(record, dict) or not record.get("running", False):
+        return orphan, dirty
+    if not _pid_is_running(record.get("pid")):
+        return orphan, dirty
+    if not _has_live_control_channel(record, now=now):
+        return orphan, dirty
+    bridge_terminal = _bridge_has_live_terminal(record)
+    if bridge_terminal is True:
+        if record.get("orphaned_at") is not None:
+            record["orphaned_at"] = None
+            dirty = True
+        return orphan, dirty
+    orphaned_at = record.get("orphaned_at")
+    if not isinstance(orphaned_at, (int, float)):
+        if bridge_terminal is False:
+            record["orphaned_at"] = now
+            dirty = True
+        return orphan, dirty
+    if now - float(orphaned_at) >= grace_secs:
+        orphan = NativeOrphan(
+            window_id=window_id,
+            window_name=str(record.get("window_name", "")),
+            pid=int(record.get("pid") or 0),
+            process_group_id=int(record.get("process_group_id") or 0),
+            reason="launcher terminal disappeared",
+        )
+    return orphan, dirty
 
 
 def update_native_snapshot(
@@ -417,18 +435,7 @@ def remove_native_session(window_id: str) -> None:
             return
         record = sessions.pop(window_id, None)
         if isinstance(record, dict):
-            cleanup_dirs: set[Path] = set()
-            for key in ("control_socket_path", "snapshot_path"):
-                raw_path = record.get(key)
-                if not isinstance(raw_path, str) or not raw_path:
-                    continue
-                path = Path(raw_path)
-                with contextlib.suppress(OSError):
-                    path.unlink(missing_ok=True)
-                cleanup_dirs.add(path.parent)
-            for directory in cleanup_dirs:
-                with contextlib.suppress(OSError):
-                    directory.rmdir()
+            _cleanup_native_artifacts(record)
         _save_registry(data)
 
 
@@ -468,66 +475,99 @@ def list_native_windows(
         for window_id, record in list(sessions.items()):
             if not isinstance(record, dict):
                 continue
-            running = bool(record.get("running", False))
-            agent_pid = record.get("pid")
-            bridge_pid = record.get("bridge_pid")
-            if running and (
-                not _pid_is_running(agent_pid)
-                or (
-                    bridge_pid is not None
-                    and not _pid_is_running(bridge_pid)
-                )
-                or not _has_live_control_channel(record, now=ts)
-            ):
-                _kill_native_process_group(record)
-                record["running"] = False
-                record["ended_at"] = ts
-                record["exit_code"] = -1
-                dirty = True
-                running = False
-            ended_at = record.get("ended_at")
-            if (
-                not running
-                and isinstance(ended_at, (int, float))
-                and ts - float(ended_at) > _RETENTION_SECS
-            ):
+            window, record_dirty, is_stale = _native_window_entry(
+                window_id,
+                record,
+                now=ts,
+                include_exited=include_exited,
+            )
+            dirty = dirty or record_dirty
+            if is_stale:
                 stale.append(window_id)
                 continue
-            if not running and not include_exited:
-                continue
-
-            windows.append(
-                NativeWindow(
-                    window_id=window_id,
-                    window_name=str(record.get("window_name", "")),
-                    cwd=str(record.get("cwd", "")),
-                    pane_current_command=str(record.get("pane_current_command", "")),
-                    pane_tty=str(record.get("pane_tty", "")),
-                    pane_width=int(record.get("columns", 0) or 0),
-                    pane_height=int(record.get("rows", 0) or 0),
-                )
-            )
+            if window is not None:
+                windows.append(window)
 
         if stale:
             for window_id in stale:
                 record = sessions.pop(window_id, None)
                 if isinstance(record, dict):
-                    cleanup_dirs: set[Path] = set()
-                    for key in ("control_socket_path", "snapshot_path"):
-                        raw_path = record.get(key)
-                        if not isinstance(raw_path, str) or not raw_path:
-                            continue
-                        path = Path(raw_path)
-                        with contextlib.suppress(OSError):
-                            path.unlink(missing_ok=True)
-                        cleanup_dirs.add(path.parent)
-                    for directory in cleanup_dirs:
-                        with contextlib.suppress(OSError):
-                            directory.rmdir()
+                    _cleanup_native_artifacts(record)
                 dirty = True
         if dirty:
             _save_registry(data)
     return windows
+
+
+def _refresh_native_running_state(record: dict[str, Any], *, now: float) -> bool:
+    running = bool(record.get("running", False))
+    if not running:
+        return False
+    agent_pid = record.get("pid")
+    bridge_pid = record.get("bridge_pid")
+    bridge_dead = bridge_pid is not None and not _pid_is_running(bridge_pid)
+    if _pid_is_running(agent_pid) and not bridge_dead and _has_live_control_channel(
+        record, now=now
+    ):
+        return True
+    _kill_native_process_group(record)
+    record["running"] = False
+    record["ended_at"] = now
+    record["exit_code"] = -1
+    return False
+
+
+def _native_window_entry(
+    window_id: str,
+    record: dict[str, Any],
+    *,
+    now: float,
+    include_exited: bool,
+) -> tuple[NativeWindow | None, bool, bool]:
+    running_before = bool(record.get("running", False))
+    running = _refresh_native_running_state(record, now=now)
+    dirty = running_before and not running
+    if _native_record_is_stale(record, now=now):
+        return None, dirty, True
+    if not running and not include_exited:
+        return None, dirty, False
+    return _native_window_from_record(window_id, record), dirty, False
+
+
+def _native_record_is_stale(record: dict[str, Any], *, now: float) -> bool:
+    if record.get("running", False):
+        return False
+    ended_at = record.get("ended_at")
+    return (
+        isinstance(ended_at, (int, float)) and now - float(ended_at) > _RETENTION_SECS
+    )
+
+
+def _native_window_from_record(window_id: str, record: dict[str, Any]) -> NativeWindow:
+    return NativeWindow(
+        window_id=window_id,
+        window_name=str(record.get("window_name", "")),
+        cwd=str(record.get("cwd", "")),
+        pane_current_command=str(record.get("pane_current_command", "")),
+        pane_tty=str(record.get("pane_tty", "")),
+        pane_width=int(record.get("columns", 0) or 0),
+        pane_height=int(record.get("rows", 0) or 0),
+    )
+
+
+def _cleanup_native_artifacts(record: dict[str, Any]) -> None:
+    cleanup_dirs: set[Path] = set()
+    for key in ("control_socket_path", "snapshot_path"):
+        raw_path = record.get(key)
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        path = Path(raw_path)
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        cleanup_dirs.add(path.parent)
+    for directory in cleanup_dirs:
+        with contextlib.suppress(OSError):
+            directory.rmdir()
 
 
 def get_native_window(window_id: str) -> NativeWindow | None:
