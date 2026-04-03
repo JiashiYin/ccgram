@@ -3,135 +3,238 @@ set -euo pipefail
 
 self_pid="$$"
 self_uid="$(id -u)"
-self_tty="$(ps -p "$self_pid" -o tty= | tr -d '[:space:]')"
 
-ps_parent_pid() {
-  local pid="$1"
-  local ppid
-
-  if ! ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')"; then
-    return 1
-  fi
-
-  [[ -n "$ppid" ]] || return 1
-  printf '%s\n' "$ppid"
-}
-
-is_descendant_of_self() {
-  local pid="$1"
-  local ppid
-
-  while [[ -n "$pid" && "$pid" != "0" ]]; do
-    if [[ "$pid" == "$self_pid" ]]; then
-      return 0
-    fi
-
-    if ! ppid="$(ps_parent_pid "$pid")"; then
-      return 2
-    fi
-
-    if [[ "$ppid" == "$pid" ]]; then
-      break
-    fi
-
-    pid="$ppid"
-  done
-
-  return 1
-}
-
-is_ancestor_of_self() {
-  local target="$1"
-  local pid="$self_pid"
-  local ppid
-
-  while [[ -n "$pid" && "$pid" != "0" ]]; do
-    if ! ppid="$(ps_parent_pid "$pid")"; then
-      return 2
-    fi
-
-    if [[ "$ppid" == "$target" ]]; then
-      return 0
-    fi
-
-    if [[ "$ppid" == "$pid" ]]; then
-      break
-    fi
-
-    pid="$ppid"
-  done
-
-  return 1
-}
-
-is_in_self_lineage() {
-  local pid="$1"
-
-  if is_descendant_of_self "$pid"; then
-    return 0
-  fi
-
-  case "$?" in
-    2) return 2 ;;
-  esac
-
-  if is_ancestor_of_self "$pid"; then
-    return 0
-  fi
-
-  return $?
-}
-
-is_codex_like_command() {
-  local comm="$1"
-  local args="$2"
-
-  case "$args" in
-    *"ccgram notify launch --provider codex"*)
-      return 0
-      ;;
-  esac
-
-  case "$comm" in
-    codex|codex-*)
-      return 0
-      ;;
-    node)
-      case "$args" in
-        *codex*)
-          return 0
-          ;;
-      esac
-      ;;
-  esac
-
-  case "$args" in
-    *" codex "*|codex|*"/codex"*|*"/codex "*)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
-is_allowed_group_member() {
-  case "$1" in
-    codex|codex-*|node|bash|sh|dash|zsh|env|sudo|setsid|bwrap|ccgram)
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
+declare -A pid_ppid
+declare -A pid_tty
+declare -A self_ancestry
+declare -A self_lineage_cache
+declare -A live_ancestor_cache
 declare -A group_rows
 declare -A group_has_codex
 declare -A group_has_unrelated
 declare -A group_has_race
 declare -A group_has_self_lineage
 declare -A group_has_tty
+declare -A group_has_attached_ancestor
 declare -A seen_groups
 declare -a group_order
+
+is_codex_path_token() {
+  local token="${1,,}"
+  local basename stem
+
+  basename="${token##*/}"
+  basename="${basename#-}"
+  stem="$basename"
+  if [[ "$stem" == *.* ]]; then
+    stem="${stem%%.*}"
+  fi
+
+  case "$token" in
+    *"@openai/codex"*|*"/codex/"*)
+      return 0
+      ;;
+  esac
+
+  case "$stem" in
+    codex)
+      return 0
+      ;;
+  esac
+
+  case "$basename" in
+    codex|codex.*)
+      return 0
+      ;;
+  esac
+
+  if [[ "$basename" != *.* ]]; then
+    case "$basename" in
+      codex-*|*-codex|*-codex-*|*_codex_*|codex_*|*_codex)
+        return 0
+        ;;
+    esac
+  fi
+
+  return 1
+}
+
+is_ccgram_codex_launch() {
+  local -a tokens=("$@")
+  local i
+
+  for ((i = 0; i + 2 < ${#tokens[@]}; i++)); do
+    if [[ "${tokens[i],,}" == "ccgram" && "${tokens[i + 1],,}" == "notify" && "${tokens[i + 2],,}" == "launch" ]]; then
+      local j
+      for ((j = i + 3; j < ${#tokens[@]}; j++)); do
+        case "${tokens[j],,}" in
+          --provider=codex)
+            return 0
+            ;;
+          --provider)
+            if (( j + 1 < ${#tokens[@]} )) && [[ "${tokens[j + 1],,}" == "codex" ]]; then
+              return 0
+            fi
+            ;;
+        esac
+      done
+    fi
+  done
+
+  return 1
+}
+
+is_codex_like_command() {
+  local comm="${1:-}"
+  local args="${2:-}"
+  local -a tokens=()
+  local pending_python_module=0
+  local token basename
+
+  if [[ -z "$args" ]]; then
+    args="$comm"
+  fi
+
+  read -r -a tokens <<<"$args"
+  if ((${#tokens[@]} == 0)); then
+    return 1
+  fi
+
+  if is_ccgram_codex_launch "${tokens[@]}"; then
+    return 0
+  fi
+
+  for token in "${tokens[@]}"; do
+    token="${token,,}"
+    basename="${token##*/}"
+    basename="${basename#-}"
+
+    case "$basename" in
+      sudo|env|node|bun|npx|bunx|uv)
+        continue
+        ;;
+      python|python3)
+        pending_python_module=1
+        continue
+        ;;
+    esac
+
+    if (( pending_python_module == 1 )) && [[ "$basename" == "-m" ]]; then
+      pending_python_module=2
+      continue
+    fi
+
+    if (( pending_python_module == 2 )); then
+      if is_codex_path_token "$token"; then
+        return 0
+      fi
+      pending_python_module=0
+    fi
+
+    if is_codex_path_token "$token"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+is_allowed_group_member() {
+  local comm="${1,,}"
+  local args="${2:-}"
+
+  if is_codex_like_command "$comm" "$args"; then
+    return 0
+  fi
+
+  comm="${comm#-}"
+  if is_codex_path_token "$comm"; then
+    return 0
+  fi
+
+  case "$comm" in
+    node|bun|npx|bunx|bash|sh|dash|zsh|fish|env|sudo|setsid|bwrap|ccgram|uv|python|python3)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+build_self_ancestry() {
+  local current="$self_pid"
+  local next
+
+  while [[ -n "$current" && "$current" != "0" ]]; do
+    self_ancestry["$current"]=1
+    if [[ -z "${pid_ppid[$current]:-}" ]]; then
+      break
+    fi
+    next="${pid_ppid[$current]}"
+    if [[ "$next" == "$current" ]]; then
+      break
+    fi
+    current="$next"
+  done
+}
+
+pid_is_in_self_lineage() {
+  local pid="$1"
+  local current="$pid"
+  local next
+
+  if [[ -n "${self_lineage_cache[$pid]+x}" ]]; then
+    return "${self_lineage_cache[$pid]}"
+  fi
+
+  while [[ -n "$current" && "$current" != "0" ]]; do
+    if [[ -n "${self_ancestry[$current]:-}" ]]; then
+      self_lineage_cache["$pid"]=0
+      return 0
+    fi
+    if [[ -z "${pid_ppid[$current]:-}" ]]; then
+      self_lineage_cache["$pid"]=2
+      return 2
+    fi
+    next="${pid_ppid[$current]}"
+    if [[ "$next" == "$current" ]]; then
+      break
+    fi
+    current="$next"
+  done
+
+  self_lineage_cache["$pid"]=1
+  return 1
+}
+
+pid_has_live_ancestor() {
+  local pid="$1"
+  local current="$pid"
+  local next
+
+  if [[ -n "${live_ancestor_cache[$pid]:-}" ]]; then
+    return "${live_ancestor_cache[$pid]}"
+  fi
+
+  while [[ -n "$current" && "$current" != "0" ]]; do
+    if [[ "$current" != "$pid" && "${pid_tty[$current]:-?}" != "?" ]]; then
+      live_ancestor_cache["$pid"]=0
+      return 0
+    fi
+    if [[ -z "${pid_ppid[$current]:-}" ]]; then
+      live_ancestor_cache["$pid"]=2
+      return 2
+    fi
+    next="${pid_ppid[$current]}"
+    if [[ "$next" == "$current" ]]; then
+      break
+    fi
+    current="$next"
+  done
+
+  live_ancestor_cache["$pid"]=1
+  return 1
+}
 
 while IFS= read -r row; do
   [[ -n "$row" ]] || continue
@@ -145,6 +248,8 @@ while IFS= read -r row; do
     continue
   fi
 
+  pid_ppid["$pid"]="$ppid"
+  pid_tty["$pid"]="$tty_name"
   if [[ -z "${seen_groups[$pgid]+x}" ]]; then
     seen_groups["$pgid"]=1
     group_order+=("$pgid")
@@ -156,53 +261,87 @@ while IFS= read -r row; do
     group_has_codex["$pgid"]=1
   fi
 
-  if ! is_allowed_group_member "$comm"; then
+  if ! is_allowed_group_member "$comm" "$args"; then
     group_has_unrelated["$pgid"]=1
   fi
 
   if [[ "$tty_name" != "?" ]]; then
     group_has_tty["$pgid"]=1
   fi
-
-  if is_in_self_lineage "$pid"; then
-    group_has_self_lineage["$pgid"]=1
-  else
-    case "$?" in
-      2)
-        group_has_race["$pgid"]=1
-        ;;
-    esac
-  fi
 done < <(
   ps -eo pid=,ppid=,uid=,pgid=,tty=,comm=,args=
 )
 
+build_self_ancestry
+
+for pgid in "${group_order[@]}"; do
+  if [[ -z "${group_has_codex[$pgid]:-}" ]]; then
+    continue
+  fi
+
+  while IFS= read -r member; do
+    [[ -n "$member" ]] || continue
+    read -r member_pid member_ppid member_uid member_pgid member_tty member_comm member_args <<<"$member"
+    if [[ -z "${member_pid:-}" ]]; then
+      continue
+    fi
+
+    pid_is_in_self_lineage "$member_pid"
+    case "$?" in
+      0)
+        group_has_self_lineage["$pgid"]=1
+        break
+        ;;
+      2)
+        group_has_race["$pgid"]=1
+        break
+        ;;
+    esac
+
+    pid_has_live_ancestor "$member_pid"
+    case "$?" in
+      0)
+        group_has_attached_ancestor["$pgid"]=1
+        break
+        ;;
+      2)
+        group_has_race["$pgid"]=1
+        break
+        ;;
+    esac
+  done <<<"${group_rows[$pgid]}"
+done
+
 if ((${#group_order[@]} == 0)); then
-  echo "No Codex processes found."
+  echo "No same-user processes found."
   exit 0
 fi
 
 candidate_count=0
 
 for pgid in "${group_order[@]}"; do
-  if [[ -z "${group_has_codex[$pgid]+x}" ]]; then
+  if [[ -z "${group_has_codex[$pgid]:-}" ]]; then
     continue
   fi
 
-  if [[ -n "${group_has_race[$pgid]+x}" ]]; then
+  if [[ -n "${group_has_race[$pgid]:-}" ]]; then
     echo "Skipping pgid=$pgid: process disappeared during scan."
     continue
   fi
 
-  if [[ -n "${group_has_self_lineage[$pgid]+x}" ]]; then
+  if [[ -n "${group_has_self_lineage[$pgid]:-}" ]]; then
     continue
   fi
 
-  if [[ -n "${group_has_unrelated[$pgid]+x}" ]]; then
+  if [[ -n "${group_has_unrelated[$pgid]:-}" ]]; then
     continue
   fi
 
-  if [[ -n "${group_has_tty[$pgid]+x}" ]]; then
+  if [[ -n "${group_has_tty[$pgid]:-}" ]]; then
+    continue
+  fi
+
+  if [[ -n "${group_has_attached_ancestor[$pgid]:-}" ]]; then
     continue
   fi
 
