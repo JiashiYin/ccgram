@@ -818,20 +818,23 @@ def _mirror_native_session(
         if stdin_fd is not None:
             read_fds.append(stdin_fd)
         ready, _, _ = select.select(read_fds, [], [], 0.05)
+        had_activity = False
 
         if state.master_fd in ready:
             with contextlib.suppress(OSError):
                 chunk = os.read(state.master_fd, 65536)
                 if chunk:
                     _record_output_chunk(state, stdout_fd=stdout_fd, chunk=chunk)
+                    had_activity = True
 
         if stdin_fd is not None and stdin_fd in ready:
             data = os.read(stdin_fd, 4096)
             if data:
                 with state.write_lock:
                     os.write(state.master_fd, data)
+                had_activity = True
 
-        if child.poll() is not None and not ready:
+        if child.poll() is not None and not had_activity:
             break
 
 

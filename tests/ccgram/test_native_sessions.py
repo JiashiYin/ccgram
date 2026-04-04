@@ -5,11 +5,15 @@ from __future__ import annotations
 import fcntl
 import json
 import signal
+import threading
+from collections import deque
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 from ccgram.native_sessions import (
     NATIVE_WINDOW_PREFIX,
+    _MirrorState,
+    _mirror_native_session,
     capture_native_pane,
     kill_native_session,
     list_native_windows,
@@ -19,6 +23,7 @@ from ccgram.native_sessions import (
     send_native_keys,
     update_native_snapshot,
 )
+from ccgram.screen_buffer import ScreenBuffer
 
 
 def test_list_native_windows_includes_running_session(tmp_path: Path, monkeypatch) -> None:
@@ -646,3 +651,34 @@ def test_find_orphaned_native_sessions_skips_on_empty_ps_result(
 
     registry = json.loads((tmp_path / "native-sessions.json").read_text())
     assert registry["sessions"][window_id]["orphaned_at"] is None
+
+
+def test_mirror_native_session_exits_when_child_is_dead_and_stdin_is_eof() -> None:
+    state = _MirrorState(
+        window_id=f"{NATIVE_WINDOW_PREFIX}mirror-eof",
+        master_fd=11,
+        columns=80,
+        rows=24,
+        buffer=ScreenBuffer(columns=80, rows=24),
+        raw_chunks=deque(),
+        write_lock=threading.Lock(),
+    )
+    child = MagicMock()
+    child.poll.return_value = 0
+
+    with (
+        patch(
+            "ccgram.native_sessions.select.select",
+            side_effect=[
+                ([10], [], []),
+                AssertionError("_mirror_native_session looped after EOF"),
+            ],
+        ),
+        patch("ccgram.native_sessions.os.read", return_value=b""),
+    ):
+        _mirror_native_session(
+            state=state,
+            child=child,
+            stdin_fd=10,
+            stdout_fd=1,
+        )
