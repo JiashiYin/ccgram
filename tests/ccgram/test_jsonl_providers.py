@@ -1643,6 +1643,39 @@ class TestCodexDiscoverTranscript:
         assert event.session_id == "uuid-current"
         assert event.transcript_path == str(fpath)
 
+    def test_searches_past_newest_twenty_when_active_match_is_older(
+        self, tmp_path: Path
+    ) -> None:
+        sessions_dir = tmp_path / ".codex" / "sessions"
+        target = _write_codex_session(
+            sessions_dir,
+            "2026/03/01",
+            "target",
+            "uuid-target",
+            "/my/project",
+        )
+        target_time = time.time() - 10
+        os.utime(target, (target_time, target_time))
+
+        for idx in range(25):
+            other = _write_codex_session(
+                sessions_dir,
+                "2026/03/02",
+                f"other-{idx}",
+                f"uuid-other-{idx}",
+                f"/other/project/{idx}",
+            )
+            newer_time = target_time + idx + 1
+            os.utime(other, (newer_time, newer_time))
+
+        codex = CodexProvider()
+        with patch.object(Path, "home", return_value=tmp_path):
+            event = codex.discover_transcript("/my/project", "ccgram:@7", max_age=0)
+
+        assert event is not None
+        assert event.session_id == "uuid-target"
+        assert event.transcript_path == str(target)
+
 
 class TestCodexDiscoverTranscriptMaxAge:
     def test_max_age_zero_ignores_staleness(self, tmp_path: Path) -> None:

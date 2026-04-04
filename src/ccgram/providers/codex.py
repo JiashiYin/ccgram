@@ -815,7 +815,7 @@ class CodexProvider(JsonlProvider):
         now = time.time()
         resolved_cwd = str(Path(cwd).resolve())
         claimed_elsewhere = _claimed_session_ids(window_key)
-        for mtime, fpath in jsonl_files[:20]:
+        for mtime, fpath in jsonl_files:
             if age_limit > 0 and now - mtime > age_limit:
                 break  # sorted newest-first; remaining are all older
             meta = _read_codex_session_meta(fpath)
