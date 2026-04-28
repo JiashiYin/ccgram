@@ -16,9 +16,11 @@ from ccgram.handlers.topic_emoji import (
     EMOJI_DONE,
     EMOJI_IDLE,
     EMOJI_YOLO,
+    clear_stale_topic,
     get_stored_topic_name,
     clear_topic_emoji_state,
     format_topic_name_for_mode,
+    iter_stale_topic_threads,
     reset_all_state,
     strip_emoji_prefix,
     update_stored_topic_name,
@@ -365,6 +367,7 @@ class TestTopicNamePreservation:
 
         assert get_stored_topic_name(-100, 41) is None
         assert get_stored_topic_name(-100, 42) == "VPN [@Jacob_CodexBot]"
+        assert iter_stale_topic_threads() == [(-100, 41)]
 
     def test_update_stored_topic_name_keeps_live_bound_duplicate_threads(self) -> None:
         from ccgram.handlers.topic_emoji import _topic_names
@@ -378,6 +381,7 @@ class TestTopicNamePreservation:
 
         assert get_stored_topic_name(-100, 41) == "helloworld [@Jacob_localCodexBot]"
         assert get_stored_topic_name(-100, 42) == "helloworld [@Jacob_localCodexBot]"
+        assert iter_stale_topic_threads() == []
 
     def test_update_stored_topic_name_prunes_plain_stale_duplicate_after_claim(self) -> None:
         from ccgram.handlers.topic_emoji import _topic_names
@@ -391,6 +395,20 @@ class TestTopicNamePreservation:
 
         assert get_stored_topic_name(-100, 41) is None
         assert get_stored_topic_name(-100, 42) == "NPU [@Jacob_localCodexBot]"
+        assert iter_stale_topic_threads() == [(-100, 41)]
+
+    def test_clear_stale_topic_removes_cleanup_marker(self) -> None:
+        from ccgram.handlers.topic_emoji import _topic_names
+
+        _topic_names[(-100, 41)] = "NPU [@Jacob_localCodexBot]"
+        with patch(
+            "ccgram.handlers.topic_emoji._is_bound_topic",
+            return_value=False,
+        ):
+            update_stored_topic_name(-100, 42, "NPU [@Jacob_localCodexBot]")
+
+        clear_stale_topic(-100, 41)
+        assert iter_stale_topic_threads() == []
 
 
 class TestClearTopicEmojiState:

@@ -49,7 +49,10 @@ from ..providers import (
     should_probe_pane_title_for_provider_detection,
 )
 from ..providers.base import StatusUpdate
-from ..native_sessions import find_orphaned_native_sessions
+from ..native_sessions import (
+    find_orphaned_native_sessions,
+    reap_untracked_direct_launcher_process_groups,
+)
 from ..session import session_manager
 from ..window_resolver import is_foreign_window
 from ..session_monitor import get_active_monitor
@@ -74,7 +77,9 @@ from .recovery_callbacks import build_recovery_keyboard
 from .response_builder import build_response_parts
 from .topic_delivery import recreate_notify_topic_binding
 from .topic_emoji import (
+    clear_stale_topic,
     clear_topic_emoji_state,
+    iter_stale_topic_threads,
     iter_stored_topic_names,
     update_stored_topic_name,
     update_topic_emoji,
@@ -572,6 +577,12 @@ async def _cleanup_orphaned_native_sessions(bot: Bot) -> None:
             "Killed orphaned native notify session %s: %s",
             orphan.window_id,
             orphan.reason,
+        )
+    for orphan in await asyncio.to_thread(reap_untracked_direct_launcher_process_groups):
+        logger.warning(
+            "Killed untracked native direct-launch process group %s: %s",
+            orphan.process_group_id,
+            orphan.command,
         )
 
 
@@ -1440,6 +1451,24 @@ async def _probe_unbound_cached_topics(bot: Bot) -> None:
                 )
 
 
+async def _cleanup_stale_duplicate_topics(bot: Bot) -> None:
+    """Delete duplicate owned topics that were superseded by a newer thread."""
+    bound_topics = {
+        (session_manager.resolve_chat_id(user_id, thread_id), thread_id)
+        for user_id, thread_id, _wid in session_manager.iter_thread_bindings()
+    }
+    for chat_id, thread_id in iter_stale_topic_threads():
+        if (chat_id, thread_id) in bound_topics:
+            continue
+        if await remove_topic(bot, chat_id, thread_id):
+            clear_stale_topic(chat_id, thread_id)
+            logger.info(
+                "Deleted stale duplicate topic: chat=%d thread=%d",
+                chat_id,
+                thread_id,
+            )
+
+
 async def _maybe_check_passive_shell(
     bot: Bot, user_id: int, window_id: str, thread_id: int
 ) -> None:
@@ -1674,6 +1703,7 @@ async def status_poll_loop(bot: Bot) -> None:
                 await _prune_stale_state(all_windows)
                 await _cleanup_ghost_bindings(bot, all_windows)
                 await _cleanup_duplicate_notify_bindings(bot)
+                await _cleanup_stale_duplicate_topics(bot)
                 await _cleanup_stale_bound_shell_windows(bot, all_windows)
                 await _probe_topic_existence(bot)
                 await _probe_unbound_cached_topics(bot)

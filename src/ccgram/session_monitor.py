@@ -53,6 +53,7 @@ _PathResolveError = (OSError, ValueError)
 _SessionMapError = (json.JSONDecodeError, OSError)
 
 _MSG_PREVIEW_LENGTH = 80
+_INITIAL_REPORT_BACKFILL_MAX_BYTES = 1024 * 1024
 
 
 def _resolve_provider_for_file(window_id: str, file_path: Path):
@@ -469,6 +470,13 @@ class SessionMonitor:
                 file_size = 0
                 current_mtime = 0.0
 
+            late_report = await self._read_late_attach_report_back(
+                session_id,
+                file_path,
+                provider,
+                window_id=window_id,
+            )
+
             if provider.capabilities.supports_incremental_read:
                 initial_offset = file_size
             else:
@@ -484,6 +492,8 @@ class SessionMonitor:
             )
             self.state.update_session(tracked)
             self._file_mtimes[session_id] = current_mtime
+            if late_report is not None:
+                new_messages.append(late_report)
             logger.debug("Started tracking session: %s", session_id)
             return
 
@@ -551,6 +561,96 @@ class SessionMonitor:
             )
 
         self.state.update_session(tracked)
+
+    def _get_session_cwd(self, session_id: str) -> str | None:
+        """Look up the cwd for a tracked session from the current session map."""
+        for _window_key, details in self._last_session_map.items():
+            if details.get("session_id") == session_id:
+                return details.get("cwd")
+        return None
+
+    async def _read_initial_backfill_entries(
+        self,
+        session_id: str,
+        file_path: Path,
+        provider: Any,
+        *,
+        window_id: str,
+    ) -> list[dict[str, Any]]:
+        """Read a bounded tail when attaching to an already-running session."""
+        if not provider.capabilities.supports_incremental_read:
+            try:
+                entries, _ = await asyncio.to_thread(
+                    provider.read_transcript_file,
+                    str(file_path),
+                    0,
+                )
+            except OSError:
+                logger.exception("Error backfilling transcript file %s", file_path)
+                return []
+            return entries
+
+        try:
+            file_size = file_path.stat().st_size
+        except OSError:
+            return []
+
+        probe = TrackedSession(
+            session_id=session_id,
+            file_path=str(file_path),
+            last_byte_offset=max(0, file_size - _INITIAL_REPORT_BACKFILL_MAX_BYTES),
+        )
+        return await self._read_new_lines(probe, file_path, window_id=window_id)
+
+    async def _read_late_attach_report_back(
+        self,
+        session_id: str,
+        file_path: Path,
+        provider: Any,
+        *,
+        window_id: str,
+    ) -> NewMessage | None:
+        """Recover the current terminal report-back when tracking starts late."""
+        if not provider.capabilities.supports_semantic_notify:
+            return None
+
+        backfill_entries = await self._read_initial_backfill_entries(
+            session_id,
+            file_path,
+            provider,
+            window_id=window_id,
+        )
+        if not backfill_entries:
+            return None
+
+        session_cwd = self._get_session_cwd(session_id)
+        backfill_messages, _remaining = provider.parse_transcript_entries(
+            backfill_entries,
+            pending_tools={},
+            cwd=session_cwd,
+        )
+        last_message = next(
+            (msg for msg in reversed(backfill_messages) if (msg.text or "").strip()),
+            None,
+        )
+        if (
+            last_message is None
+            or last_message.role != "assistant"
+            or last_message.notify_kind != "report_back"
+        ):
+            return None
+
+        return NewMessage(
+            session_id=session_id,
+            text=last_message.text,
+            is_complete=True,
+            content_type=last_message.content_type,
+            tool_use_id=last_message.tool_use_id,
+            role=last_message.role,
+            tool_name=last_message.tool_name,
+            phase=last_message.phase,
+            notify_kind=last_message.notify_kind,
+        )
 
     async def check_for_updates(
         self, current_map: dict[str, dict[str, str]]

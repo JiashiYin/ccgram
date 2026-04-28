@@ -39,6 +39,7 @@ logger = structlog.get_logger()
 NATIVE_WINDOW_PREFIX = "native:"
 _REGISTRY_FILE = "native-sessions.json"
 _REGISTRY_LOCK_FILE = "native-sessions.lock"
+_NOTIFY_STATE_FILE = "notify-state.json"
 _RETENTION_SECS = 300.0
 _RAW_HISTORY_LIMIT = 200_000
 _CONTROL_SOCKET_GRACE_SECS = 5.0
@@ -66,6 +67,12 @@ class NativeOrphan:
     reason: str
 
 
+@dataclass(frozen=True)
+class UntrackedNativeProcessGroup:
+    process_group_id: int
+    command: str
+
+
 @dataclass
 class _MirrorState:
     window_id: str
@@ -75,6 +82,7 @@ class _MirrorState:
     buffer: ScreenBuffer
     raw_chunks: deque[str]
     write_lock: threading.Lock
+    resize_pending: bool = False
 
 
 def is_native_window(window_id: str) -> bool:
@@ -87,6 +95,10 @@ def _registry_path() -> Path:
 
 def _registry_lock_path() -> Path:
     return ccgram_dir() / _REGISTRY_LOCK_FILE
+
+
+def _notify_state_path() -> Path:
+    return ccgram_dir() / _NOTIFY_STATE_FILE
 
 
 @contextlib.contextmanager
@@ -123,6 +135,17 @@ def _load_registry() -> dict[str, Any]:
 
 def _save_registry(data: dict[str, Any]) -> None:
     atomic_write_json(_registry_path(), data)
+
+
+def _load_notify_state() -> dict[str, Any]:
+    path = _notify_state_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 def _update_record(window_id: str, **changes: object) -> None:
@@ -293,6 +316,45 @@ def find_orphaned_native_sessions(
     return orphans
 
 
+def find_untracked_direct_launcher_process_groups() -> list[UntrackedNativeProcessGroup]:
+    """Find detached direct-launch process groups missing from the registry."""
+    launcher_paths = _configured_direct_launcher_paths()
+    if not launcher_paths:
+        return []
+    tracked_process_groups = _tracked_native_process_groups()
+    entries = _list_process_table_entries()
+    orphans: list[UntrackedNativeProcessGroup] = []
+    seen_groups: set[int] = set()
+    for entry in entries:
+        try:
+            pid_str, ppid_str, pgid_str, tty, args = entry.split(None, 4)
+            _ = int(pid_str)
+            ppid = int(ppid_str)
+            pgid = int(pgid_str)
+        except (ValueError, TypeError):
+            continue
+        if ppid != 1 or tty not in {"?", "??"} or pgid <= 0:
+            continue
+        if pgid in tracked_process_groups or pgid in seen_groups:
+            continue
+        if not any(path in args for path in launcher_paths):
+            continue
+        seen_groups.add(pgid)
+        orphans.append(
+            UntrackedNativeProcessGroup(process_group_id=pgid, command=args)
+        )
+    return orphans
+
+
+def reap_untracked_direct_launcher_process_groups() -> list[UntrackedNativeProcessGroup]:
+    """Kill detached direct-launch process groups that lost registry ownership."""
+    orphans = find_untracked_direct_launcher_process_groups()
+    for orphan in orphans:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(orphan.process_group_id, signal.SIGKILL)
+    return orphans
+
+
 def _classify_native_orphan(
     window_id: str,
     record: Any,
@@ -331,6 +393,50 @@ def _classify_native_orphan(
     return orphan, dirty
 
 
+def _configured_direct_launcher_paths() -> set[str]:
+    state = _load_notify_state()
+    providers = state.get("providers", {})
+    if not isinstance(providers, dict):
+        return set()
+    paths: set[str] = set()
+    for entry in providers.values():
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("direct_launcher_path")
+        if isinstance(path, str) and path:
+            paths.add(path)
+    return paths
+
+
+def _tracked_native_process_groups() -> set[int]:
+    data = _load_registry()
+    sessions = data.get("sessions", {})
+    if not isinstance(sessions, dict):
+        return set()
+    groups: set[int] = set()
+    for record in sessions.values():
+        if not isinstance(record, dict):
+            continue
+        pgid = record.get("process_group_id")
+        if isinstance(pgid, int) and pgid > 0:
+            groups.add(pgid)
+    return groups
+
+
+def _list_process_table_entries() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,pgid=,tty=,args="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def update_native_snapshot(
     window_id: str,
     *,
@@ -355,7 +461,10 @@ def update_native_snapshot(
             "updated_at": time.time(),
         },
     )
-    _update_record(window_id, columns=columns, rows=rows)
+    current_columns = int(record.get("columns", 0) or 0)
+    current_rows = int(record.get("rows", 0) or 0)
+    if current_columns != columns or current_rows != rows:
+        _update_record(window_id, columns=columns, rows=rows)
 
 
 def mark_native_session_exited(
@@ -766,21 +875,34 @@ def _record_output_chunk(
     )
 
 
+def _apply_pending_resize(state: _MirrorState) -> bool:
+    if not state.resize_pending:
+        return False
+    state.resize_pending = False
+    columns, rows = _current_terminal_size()
+    if columns == state.columns and rows == state.rows:
+        return False
+    with state.write_lock:
+        _set_winsize(state.master_fd, columns, rows)
+    state.columns = columns
+    state.rows = rows
+    state.buffer = ScreenBuffer(columns=columns, rows=rows)
+    raw_text = "".join(state.raw_chunks)
+    if raw_text:
+        state.buffer.feed(raw_text)
+    update_native_snapshot(
+        state.window_id,
+        rendered_text=state.buffer.rendered_text,
+        raw_text=raw_text,
+        columns=columns,
+        rows=rows,
+    )
+    return True
+
+
 def _make_resize_handler(state: _MirrorState):
     def _refresh_winsize(*_args: object) -> None:
-        state.columns, state.rows = _current_terminal_size()
-        _set_winsize(state.master_fd, state.columns, state.rows)
-        state.buffer = ScreenBuffer(columns=state.columns, rows=state.rows)
-        raw_text = "".join(state.raw_chunks)
-        if raw_text:
-            state.buffer.feed(raw_text)
-        update_native_snapshot(
-            state.window_id,
-            rendered_text=state.buffer.rendered_text,
-            raw_text=raw_text,
-            columns=state.columns,
-            rows=state.rows,
-        )
+        state.resize_pending = True
 
     return _refresh_winsize
 
@@ -814,6 +936,7 @@ def _mirror_native_session(
     stdout_fd: int,
 ) -> None:
     while True:
+        _apply_pending_resize(state)
         read_fds = [state.master_fd]
         if stdin_fd is not None:
             read_fds.append(stdin_fd)

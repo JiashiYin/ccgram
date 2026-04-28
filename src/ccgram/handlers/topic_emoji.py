@@ -68,10 +68,15 @@ _pending_transitions: dict[tuple[int, int], tuple[str, float]] = {}
 # tmux window renames and Telegram topic renames propagate correctly.
 _topic_names: dict[tuple[int, int], str] = {}
 _TOPIC_NAME_CACHE_FILE = "topic-names.json"
+_STALE_TOPIC_CACHE_FILE = "stale-topics.json"
 
 
 def _topic_name_cache_path() -> Path:
     return ccgram_dir() / _TOPIC_NAME_CACHE_FILE
+
+
+def _stale_topic_cache_path() -> Path:
+    return ccgram_dir() / _STALE_TOPIC_CACHE_FILE
 
 
 def _load_topic_name_cache() -> dict[tuple[int, int], str]:
@@ -108,6 +113,39 @@ def _save_topic_name_cache() -> None:
 
 
 _topic_names.update(_load_topic_name_cache())
+
+
+def _load_stale_topic_cache() -> set[tuple[int, int]]:
+    path = _stale_topic_cache_path()
+    if not path.exists():
+        return set()
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return set()
+    if not isinstance(raw, list):
+        return set()
+
+    parsed: set[tuple[int, int]] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        chat_raw, sep, thread_raw = item.partition(":")
+        if not sep:
+            continue
+        try:
+            parsed.add((int(chat_raw), int(thread_raw)))
+        except ValueError:
+            continue
+    return parsed
+
+
+def _save_stale_topic_cache() -> None:
+    serialized = sorted(f"{chat_id}:{thread_id}" for chat_id, thread_id in _stale_topics)
+    atomic_write_json(_stale_topic_cache_path(), serialized)
+
+
+_stale_topics: set[tuple[int, int]] = _load_stale_topic_cache()
 
 # Chats where editForumTopic is disabled due to permission errors
 _disabled_chats: set[int] = set()
@@ -161,6 +199,7 @@ def _prune_duplicate_topic_names(
             cached_thread_id,
             cached_name,
         )
+        _stale_topics.add((cached_chat_id, cached_thread_id))
         _topic_names.pop((cached_chat_id, cached_thread_id), None)
         changed = True
     return changed
@@ -347,6 +386,7 @@ def update_stored_topic_name(chat_id: int, thread_id: int, new_clean_name: str) 
     changed = _prune_duplicate_topic_names(chat_id, thread_id, clean_name) or changed
     if changed:
         _save_topic_name_cache()
+        _save_stale_topic_cache()
 
 
 def get_stored_topic_name(chat_id: int, thread_id: int) -> str | None:
@@ -359,13 +399,32 @@ def iter_stored_topic_names() -> list[tuple[int, int, str]]:
     return [(chat_id, thread_id, name) for (chat_id, thread_id), name in _topic_names.items()]
 
 
+def iter_stale_topic_threads() -> list[tuple[int, int]]:
+    """Return chat/thread pairs of unbound duplicate topics queued for deletion."""
+    return sorted(_stale_topics)
+
+
+def clear_stale_topic(chat_id: int, thread_id: int) -> None:
+    """Forget a stale duplicate-topic cleanup entry."""
+    if (chat_id, thread_id) in _stale_topics:
+        _stale_topics.remove((chat_id, thread_id))
+        _save_stale_topic_cache()
+
+
 def clear_topic_emoji_state(chat_id: int, thread_id: int) -> None:
     """Clear emoji tracking for a topic (called on topic cleanup)."""
     key = (chat_id, thread_id)
     _topic_states.pop(key, None)
     _pending_transitions.pop(key, None)
-    if _topic_names.pop(key, None) is not None:
+    topic_changed = _topic_names.pop(key, None) is not None
+    stale_changed = False
+    if key in _stale_topics:
+        _stale_topics.remove(key)
+        stale_changed = True
+    if topic_changed:
         _save_topic_name_cache()
+    if stale_changed:
+        _save_stale_topic_cache()
 
 
 def reset_all_state() -> None:
@@ -374,3 +433,4 @@ def reset_all_state() -> None:
     _pending_transitions.clear()
     _disabled_chats.clear()
     _topic_names.clear()
+    _stale_topics.clear()

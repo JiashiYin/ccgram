@@ -17,6 +17,7 @@ from ccgram.handlers.status_polling import (
     _check_autoclose_timers,
     _cleanup_ghost_bindings,
     _cleanup_orphaned_native_sessions,
+    _cleanup_stale_duplicate_topics,
     _cleanup_stale_bound_shell_windows,
     _check_transcript_activity,
     _clear_autoclose_if_active,
@@ -1226,6 +1227,43 @@ class TestUnboundCachedTopicProbe:
             await _probe_unbound_cached_topics(bot)
 
         bot.unpin_all_forum_topic_messages.assert_not_called()
+
+
+class TestStaleDuplicateTopicCleanup:
+    async def test_deletes_unbound_stale_duplicate_topics(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.iter_stale_topic_threads",
+                return_value=[(-100, 41)],
+            ),
+            patch("ccgram.handlers.status_polling.remove_topic", return_value=True) as mock_remove,
+            patch("ccgram.handlers.status_polling.clear_stale_topic") as mock_clear,
+        ):
+            mock_sm.iter_thread_bindings.return_value = []
+            await _cleanup_stale_duplicate_topics(bot)
+
+        mock_remove.assert_awaited_once_with(bot, -100, 41)
+        mock_clear.assert_called_once_with(-100, 41)
+
+    async def test_keeps_live_bound_threads_out_of_stale_cleanup(self) -> None:
+        bot = AsyncMock(spec=Bot)
+        with (
+            patch("ccgram.handlers.status_polling.session_manager") as mock_sm,
+            patch(
+                "ccgram.handlers.status_polling.iter_stale_topic_threads",
+                return_value=[(-100, 41)],
+            ),
+            patch("ccgram.handlers.status_polling.remove_topic") as mock_remove,
+            patch("ccgram.handlers.status_polling.clear_stale_topic") as mock_clear,
+        ):
+            mock_sm.iter_thread_bindings.return_value = [(1, 41, "@5")]
+            mock_sm.resolve_chat_id.return_value = -100
+            await _cleanup_stale_duplicate_topics(bot)
+
+        mock_remove.assert_not_called()
+        mock_clear.assert_not_called()
 
     @pytest.mark.parametrize(
         "exc",

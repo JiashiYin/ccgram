@@ -470,6 +470,112 @@ class TestCheckForUpdates:
         assert tracked is not None
         assert tracked.last_byte_offset == session_file.stat().st_size
 
+    async def test_new_codex_session_backfills_terminal_report_back(
+        self, tmp_path
+    ) -> None:
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text("{}\n")
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        new_messages = []
+
+        with (
+            patch(
+                "ccgram.session_monitor.get_provider_for_window",
+                return_value=CodexProvider(),
+            ),
+            patch.object(
+                monitor,
+                "_read_initial_backfill_entries",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "phase": "final_answer",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "RALPH_DONE"}
+                            ],
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "last_agent_message": "RALPH_DONE",
+                        },
+                    },
+                ],
+            ),
+        ):
+            await monitor._process_session_file(
+                "sess-direct", session_file, new_messages, window_id="@0"
+            )
+
+        assert len(new_messages) == 1
+        assert new_messages[0].text == "RALPH_DONE"
+        assert new_messages[0].notify_kind == "report_back"
+        tracked = monitor.state.get_session("sess-direct")
+        assert tracked is not None
+        assert tracked.last_byte_offset == session_file.stat().st_size
+
+    async def test_new_codex_session_skips_stale_report_back_when_transcript_resumed(
+        self, tmp_path
+    ) -> None:
+        session_file = tmp_path / "transcript.jsonl"
+        session_file.write_text("{}\n")
+
+        monitor = SessionMonitor(
+            projects_path=tmp_path / "projects",
+            state_file=tmp_path / "ms.json",
+        )
+        new_messages = []
+
+        with (
+            patch(
+                "ccgram.session_monitor.get_provider_for_window",
+                return_value=CodexProvider(),
+            ),
+            patch.object(
+                monitor,
+                "_read_initial_backfill_entries",
+                new_callable=AsyncMock,
+                return_value=[
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "phase": "final_answer",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "RALPH_DONE"}
+                            ],
+                        },
+                    },
+                    {
+                        "type": "input_item",
+                        "payload": {
+                            "role": "user",
+                            "content": "keep working on phase 2",
+                        },
+                    },
+                ],
+            ),
+        ):
+            await monitor._process_session_file(
+                "sess-direct", session_file, new_messages, window_id="@0"
+            )
+
+        assert new_messages == []
+        tracked = monitor.state.get_session("sess-direct")
+        assert tracked is not None
+        assert tracked.last_byte_offset == session_file.stat().st_size
+
     async def test_unchanged_mtime_skips_read(self, tmp_path) -> None:
         projects_path = tmp_path / "projects"
         work_dir = tmp_path / "myproj"
