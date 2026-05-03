@@ -438,9 +438,12 @@ class TestNotifyInstall:
         assert second.exit_code == 0
 
         direct_launcher = _direct_launcher_path(tmp_path, "codex")
-        assert "/opt/codex/bin/codex --fast" in direct_launcher.read_text()
+        launcher_text = direct_launcher.read_text()
+        assert "/opt/codex/bin/codex --fast" in launcher_text
+        assert "--ask-for-approval never" in launcher_text
+        assert "--sandbox workspace-write" in launcher_text
 
-    def test_install_preserves_simple_existing_bash_function_flags(
+    def test_install_translates_legacy_full_auto_from_existing_bash_function(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         runner = CliRunner()
@@ -473,7 +476,10 @@ class TestNotifyInstall:
         assert result.exit_code == 0
         direct_launcher = _direct_launcher_path(tmp_path, "codex")
         launcher_text = direct_launcher.read_text()
-        assert "/usr/bin/codex --full-auto" in launcher_text
+        assert "/usr/bin/codex" in launcher_text
+        assert "--full-auto" not in launcher_text
+        assert "--ask-for-approval never" in launcher_text
+        assert "--sandbox workspace-write" in launcher_text
         assert "--add-dir /home/jacob/.agents/skills" in launcher_text
         assert "--add-dir /home/jacob/.codex/rules" in launcher_text
 
@@ -524,7 +530,62 @@ class TestNotifyInstall:
 
         assert result.exit_code == 0
         launcher_text = _direct_launcher_path(tmp_path, "codex").read_text()
-        assert "/usr/bin/codex --full-auto" in launcher_text
+        assert "/usr/bin/codex" in launcher_text
+        assert "--full-auto" not in launcher_text
+        assert "--ask-for-approval never" in launcher_text
+        assert "--sandbox workspace-write" in launcher_text
+
+    def test_resolve_notify_launch_command_repairs_stale_codex_direct_launcher(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        runner = CliRunner()
+        monkeypatch.setenv("CCGRAM_DIR", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _seed_telegram_env(monkeypatch)
+
+        state = {
+            "providers": {
+                "codex": {
+                    "provider": "codex",
+                    "enabled": True,
+                    "shell": "bash",
+                    "mode": "notify",
+                    "rc_path": str(tmp_path / ".bashrc"),
+                    "snippet_path": str(_notify_snippet_path(tmp_path, "codex", "bash")),
+                    "direct_launcher_path": str(_direct_launcher_path(tmp_path, "codex")),
+                    "direct_command": "/usr/bin/codex --full-auto --add-dir /home/jacob/.agents/skills",
+                }
+            }
+        }
+        _notify_state_path(tmp_path).write_text(json.dumps(state))
+        _direct_launcher_path(tmp_path, "codex").parent.mkdir(parents=True, exist_ok=True)
+        _direct_launcher_path(tmp_path, "codex").write_text(
+            "#!/usr/bin/env bash\nexec /usr/bin/codex --full-auto --add-dir /home/jacob/.agents/skills \"$@\"\n"
+        )
+        (tmp_path / ".env").write_text(
+            f"CCGRAM_CODEX_COMMAND={_direct_launcher_path(tmp_path, 'codex')}\n"
+        )
+
+        install = runner.invoke(
+            cli, ["notify", "install", "--provider", "codex", "--shell", "bash"]
+        )
+        assert install.exit_code == 0
+
+        from ccgram.notify_shell import get_notify_status, resolve_notify_launch_command
+
+        command = resolve_notify_launch_command("codex")
+        assert command == str(_direct_launcher_path(tmp_path, "codex"))
+
+        launcher_text = _direct_launcher_path(tmp_path, "codex").read_text()
+        assert "--full-auto" not in launcher_text
+        assert "--ask-for-approval never" in launcher_text
+        assert "--sandbox workspace-write" in launcher_text
+        assert "--add-dir /home/jacob/.agents/skills" in launcher_text
+
+        status = get_notify_status("codex")
+        assert "--full-auto" not in status.direct_command
+        assert "--ask-for-approval never" in status.direct_command
+        assert "--sandbox workspace-write" in status.direct_command
 
     def test_install_falls_back_when_bash_function_probe_times_out(
         self, tmp_path: Path, monkeypatch
@@ -549,7 +610,7 @@ class TestNotifyInstall:
 
         assert result.exit_code == 0
         launcher_text = _direct_launcher_path(tmp_path, "codex").read_text()
-        assert "exec /usr/bin/codex \"$@\"" in launcher_text
+        assert "exec /usr/bin/codex --ask-for-approval never --sandbox workspace-write \"$@\"" in launcher_text
 
     def test_resolve_notify_launch_command_prefers_installed_direct_launcher(
         self, tmp_path: Path, monkeypatch
@@ -588,6 +649,8 @@ class TestNotifyInstall:
         command = resolve_notify_launch_command("codex", dangerous=True)
         assert str(_direct_launcher_path(tmp_path, "codex")) not in command
         assert "--full-auto" not in command
+        assert "--ask-for-approval" not in command
+        assert "--sandbox" not in command
         assert "--dangerously-bypass-approvals-and-sandbox" in command
 
 

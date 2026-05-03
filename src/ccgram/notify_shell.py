@@ -28,6 +28,14 @@ _DANGEROUS_FLAGS: dict[str, str] = {
     "codex": "--dangerously-bypass-approvals-and-sandbox",
     "gemini": "--yolo",
 }
+_DEFAULT_PROVIDER_FLAGS: dict[str, tuple[str, ...]] = {
+    "codex": ("--ask-for-approval", "never", "--sandbox", "workspace-write"),
+}
+_LEGACY_PROVIDER_FLAG_REWRITES: dict[str, dict[str, tuple[str, ...]]] = {
+    "codex": {
+        "--full-auto": ("--ask-for-approval", "never", "--sandbox", "workspace-write"),
+    }
+}
 
 
 @dataclass
@@ -260,6 +268,60 @@ def _write_direct_launcher(path: Path, command: str) -> None:
     path.chmod(0o755)
 
 
+def _rewrite_legacy_provider_flags(command: str, provider: str) -> str:
+    rewrites = _LEGACY_PROVIDER_FLAG_REWRITES.get(provider.lower(), {})
+    if not command or not rewrites:
+        return command
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command
+
+    normalized: list[str] = []
+    changed = False
+    for token in tokens:
+        replacement = rewrites.get(token)
+        if replacement is not None:
+            normalized.extend(replacement)
+            changed = True
+            continue
+        normalized.append(token)
+
+    if not changed:
+        return command
+    return " ".join(shlex.quote(token) for token in normalized)
+
+
+def _apply_notify_default_flags(command: str, provider: str) -> str:
+    defaults = _DEFAULT_PROVIDER_FLAGS.get(provider.lower(), ())
+    if not defaults:
+        return command
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command
+
+    dangerous_flag = _DANGEROUS_FLAGS.get(provider.lower())
+    for token in tokens:
+        if dangerous_flag and token == dangerous_flag:
+            return command
+        if token in ("-a", "--ask-for-approval", "-s", "--sandbox"):
+            return command
+        if token.startswith("--ask-for-approval=") or token.startswith("--sandbox="):
+            return command
+
+    tokens.extend(defaults)
+    return " ".join(shlex.quote(token) for token in tokens)
+
+
+def _normalize_direct_command(command: str, provider: str) -> str:
+    """Rewrite provider-specific legacy launch flags and apply notify defaults."""
+    return _apply_notify_default_flags(
+        _rewrite_legacy_provider_flags(command, provider),
+        provider,
+    )
+
+
 def _apply_dangerous_overrides(command: str, provider: str, *, dangerous: bool) -> str:
     """Adjust a preserved direct command for a dangerous launch request."""
     if not dangerous:
@@ -323,24 +385,60 @@ def _resolve_direct_command(
     direct_path = _direct_launcher_path(provider)
     override = os.environ.get(env_key, "")
     if override and override != str(direct_path):
-        return override
+        return _normalize_direct_command(override, provider)
 
     function_command = _command_from_shell_function(
         provider,
         _capture_existing_shell_function(provider, shell_name),
     )
     if function_command:
-        return function_command
+        return _normalize_direct_command(function_command, provider)
 
     if existing:
         direct_command = existing.get("direct_command", "")
         if isinstance(direct_command, str) and direct_command:
-            return direct_command
+            return _normalize_direct_command(direct_command, provider)
 
     path = shutil.which(provider)
     if path:
-        return path
-    return resolve_capabilities(provider).launch_command
+        return _normalize_direct_command(path, provider)
+    return _normalize_direct_command(resolve_capabilities(provider).launch_command, provider)
+
+
+def _sync_direct_launcher_if_needed(provider: str, status: NotifyStatus) -> NotifyStatus:
+    """Refresh persisted direct-launch artifacts after provider CLI changes."""
+    if not status.installed:
+        return status
+    normalized = _normalize_direct_command(status.direct_command, provider)
+    if not normalized:
+        return status
+
+    launcher_path = Path(status.direct_launcher_path)
+    expected_launcher = _render_direct_launcher(normalized)
+    try:
+        current_launcher = launcher_path.read_text() if launcher_path.exists() else ""
+    except OSError:
+        current_launcher = ""
+
+    state_changed = normalized != status.direct_command
+    launcher_changed = current_launcher != expected_launcher
+    if not state_changed and not launcher_changed:
+        return status
+
+    if launcher_changed:
+        _write_direct_launcher(launcher_path, normalized)
+
+    if state_changed:
+        state = _load_state()
+        providers = state.get(_STATE_PROVIDERS_KEY)
+        if isinstance(providers, dict):
+            entry = providers.get(provider)
+            if isinstance(entry, dict):
+                entry["direct_command"] = normalized
+                providers[provider] = entry
+                _save_state(state)
+
+    return get_notify_status(provider)
 
 
 def install_notify_shell(
@@ -515,7 +613,7 @@ def resolve_notify_launch_command(
     provider: str, *, dangerous: bool = False
 ) -> str:
     """Resolve the command used for notify-managed provider launches."""
-    status = get_notify_status(provider)
+    status = _sync_direct_launcher_if_needed(provider, get_notify_status(provider))
     if not dangerous and status.installed and status.direct_launcher_exists:
         return status.env_value or status.direct_launcher_path
     base_command = status.direct_command or resolve_launch_command(provider)
